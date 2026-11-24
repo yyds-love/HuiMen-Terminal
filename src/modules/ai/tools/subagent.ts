@@ -1,7 +1,8 @@
+import { usePreferencesStore } from "@/modules/settings/preferences";
 import { tool } from "ai";
 import { z } from "zod";
-import { runSubagent } from "../agents/runSubagent";
 import { SUBAGENTS, type SubagentType } from "../agents/registry";
+import { runSubagent } from "../agents/runSubagent";
 import { useChatStore } from "../store/chatStore";
 import type { ToolContext } from "./context";
 
@@ -29,16 +30,32 @@ ${TYPE_KEYS.map((k) => `- ${k}: ${SUBAGENTS[k].description}`).join("\n")}
           .describe("在聊天界面的启动卡片上显示的简短标签。"),
       }),
       execute: async ({ type, prompt, description }) => {
-        const { apiKeys, selectedModelId, patchAgentMeta } =
+        const { apiKeys, customEndpointKeys, selectedModelId, patchAgentMeta } =
           useChatStore.getState();
+        const preferences = usePreferencesStore.getState();
         try {
           const r = await runSubagent({
             type,
             prompt,
-            keys: apiKeys,
+            keys: { ...apiKeys },
             modelId: selectedModelId,
+            localProviderConfig: {
+              openaiCompatibleBaseURL: preferences.openaiCompatibleBaseURL,
+              openaiCompatibleModelId: preferences.openaiCompatibleModelId,
+              customEndpoints: preferences.customEndpoints.map((endpoint) => ({
+                ...endpoint,
+              })),
+              customEndpointKeys: { ...customEndpointKeys },
+            },
             toolContext: ctx,
-            onStep: (label) => patchAgentMeta({ step: label }),
+            onStep: (label) => {
+              if (
+                useChatStore.getState().activeSessionId !== ctx.getSessionId()
+              ) {
+                return;
+              }
+              patchAgentMeta({ step: label });
+            },
           });
           return {
             type,

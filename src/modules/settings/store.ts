@@ -10,7 +10,7 @@ import {
 } from "@/modules/ai/config";
 import type { KeyBinding, ShortcutId } from "@/modules/shortcuts/shortcuts";
 import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { LazyStore } from "@tauri-apps/plugin-store";
+import { Store } from "@tauri-apps/plugin-store";
 
 export type ThemePref = "system" | "light" | "dark";
 
@@ -172,15 +172,26 @@ export const DEFAULT_PREFERENCES: Preferences = {
   editorAutoSaveDelay: 1000,
 };
 
-const store = new LazyStore(STORE_PATH, { defaults: {}, autoSave: 200 });
+let storePromise: Promise<Store> | undefined;
 
-// LazyStore.onChange only fires within the writing process. The settings
-// page lives in a separate webview, so writes there never reach the main
-// window's subscribers. Mirror every setter through a Tauri event so any
-// window can listen.
+function getPreferencesStore(): Promise<Store> {
+  // LazyStore retains a rejected initial load forever. Share successful opens,
+  // but let the next caller retry if the native resource could not be opened.
+  storePromise ??= Store.load(STORE_PATH, { defaults: {}, autoSave: 200 }).catch(
+    (error: unknown) => {
+      storePromise = undefined;
+      throw error;
+    },
+  );
+  return storePromise;
+}
+
+// Preserve the explicit cross-window notifications used by existing clients
+// alongside the store plugin's own change events.
 const PREFS_CHANGED_EVENT = "terax://prefs-changed";
 
 async function writePref<T>(key: string, value: T): Promise<void> {
+  const store = await getPreferencesStore();
   await store.set(key, value);
   await store.save();
   await emit(PREFS_CHANGED_EVENT, { key, value });
@@ -189,7 +200,7 @@ async function writePref<T>(key: string, value: T): Promise<void> {
 export async function loadPreferences(): Promise<Preferences> {
   // Single IPC roundtrip — fetching keys individually fans out to one
   // `plugin:store|get` per setting and is the dominant boot cost.
-  const entries = await store.entries();
+  const entries = await (await getPreferencesStore()).entries();
   const map = new Map<string, unknown>(entries);
   const get = <T>(k: string): T | undefined => map.get(k) as T | undefined;
   return {
@@ -488,6 +499,22 @@ export async function resetShortcuts(): Promise<void> {
 
 export type PrefKey = keyof Preferences;
 
+async function releasePreferencesListeners(
+  listeners: UnlistenFn[],
+): Promise<void> {
+  // Tauri's runtime unlisteners return promises despite their void signature.
+  // Observe both asynchronous rejections and synchronous throws, and always
+  // attempt every cleanup without replacing the original initialization error.
+  const results = await Promise.allSettled(
+    listeners.map((unlisten) => Promise.resolve().then(unlisten)),
+  );
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error("Failed to remove a preferences listener:", result.reason);
+    }
+  }
+}
+
 /** Subscribe to changes from any window (settings → main). */
 export async function onPreferencesChange(
   cb: (key: PrefKey, value: unknown) => void,
@@ -528,23 +555,33 @@ export async function onPreferencesChange(
     [KEY_EDITOR_AUTO_SAVE]: "editorAutoSave",
     [KEY_EDITOR_AUTO_SAVE_DELAY]: "editorAutoSaveDelay",
   };
-  // Same-process writes still fire onChange immediately; cross-window writes
-  // arrive via the Tauri event emitted by writePref().
+  // Observe plugin changes and retain the explicit notification channel used
+  // by existing clients; callbacks are disabled before releasing either one.
+  const store = await getPreferencesStore();
+  let active = true;
   const unsubLocal = await store.onChange<unknown>((key, value) => {
     const mapped = map[key];
-    if (mapped) cb(mapped, value);
+    if (active && mapped) cb(mapped, value);
   });
-  const unsubEvent = await listen<{ key: string; value: unknown }>(
-    PREFS_CHANGED_EVENT,
-    (e) => {
-      const mapped = map[e.payload.key];
-      if (mapped) cb(mapped, e.payload.value);
-    },
-  );
-  return () => {
-    unsubLocal();
-    unsubEvent();
-  };
+  try {
+    const unsubEvent = await listen<{ key: string; value: unknown }>(
+      PREFS_CHANGED_EVENT,
+      (e) => {
+        const mapped = map[e.payload.key];
+        if (active && mapped) cb(mapped, e.payload.value);
+      },
+    );
+    let cleanup: Promise<void> | undefined;
+    return () => {
+      active = false;
+      cleanup ??= releasePreferencesListeners([unsubLocal, unsubEvent]);
+      return cleanup;
+    };
+  } catch (error) {
+    active = false;
+    await releasePreferencesListeners([unsubLocal]);
+    throw error;
+  }
 }
 
 // API key changes are stored in OS keychain (not the prefs store),

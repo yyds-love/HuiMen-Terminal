@@ -1,9 +1,20 @@
-import { describe, expect, it } from "vitest";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   checkReadable,
   checkReadableCanonical,
   checkShellCommand,
   checkWritable,
+  checkWritableCanonical,
 } from "./security";
 
 describe("checkReadable — secret basenames", () => {
@@ -42,9 +53,11 @@ describe("checkReadable — secret basenames", () => {
     expect(checkReadable("/home/me/Documents/id_rsa_old")).toMatchObject({
       ok: false,
     });
-    expect(checkReadable("/home/me/Documents/id_ed25519-backup")).toMatchObject({
-      ok: false,
-    });
+    expect(checkReadable("/home/me/Documents/id_ed25519-backup")).toMatchObject(
+      {
+        ok: false,
+      },
+    );
     expect(checkReadable("/home/me/Documents/id_rsa.pub")).toMatchObject({
       ok: false,
     });
@@ -227,16 +240,223 @@ describe("checkShellCommand — home directory rm guard", () => {
 
   it("blocks rm -rf on home subdirectories", () => {
     expect(checkShellCommand("rm -rf ~/subdir")).toMatchObject({ ok: false });
-    expect(checkShellCommand("rm -rf ~/subdir && ls")).toMatchObject({ ok: false });
+    expect(checkShellCommand("rm -rf ~/subdir && ls")).toMatchObject({
+      ok: false,
+    });
   });
 
   it("blocks rm -rf when the home target is immediately followed by a pipe", () => {
     expect(checkShellCommand("rm -rf ~|cat")).toMatchObject({ ok: false });
     expect(checkShellCommand("rm -rf $HOME|cat")).toMatchObject({ ok: false });
-    expect(checkShellCommand("rm -rf ${HOME}|cat")).toMatchObject({ ok: false });
+    expect(checkShellCommand("rm -rf ${HOME}|cat")).toMatchObject({
+      ok: false,
+    });
   });
 
   it("does not block rm -rf on explicit absolute paths", () => {
-    expect(checkShellCommand("rm -rf /home/me/safe")).toMatchObject({ ok: true });
+    expect(checkShellCommand("rm -rf /home/me/safe")).toMatchObject({
+      ok: true,
+    });
+  });
+});
+
+// Synthetic paths only: these cases must never open real credential files.
+describe("AI credential path policy", () => {
+  it.each([
+    "/home/me/.codex/auth.json",
+    "/home/me/.codex/auth.json.bak",
+    ".codex/auth.json",
+    "C:\\Users\\me\\.CODEX\\AUTH.JSON",
+    "\\\\?\\C:\\Users\\me\\.codex\\auth.json::$DATA",
+    "/home/me/.codex./auth.json ",
+    "/home/me/.claude/settings.json",
+    "/repo/.claude/settings.local.json",
+    "/home/me/.claude/.credentials.json",
+    "/home/me/.claude/.credentials.json.backup",
+    "/home/me/.xuya/agent-providers.sqlite",
+    "/home/me/.xuya/agent-providers.sqlite-wal",
+    "/home/me/.xuya/agent-providers.sqlite-shm",
+    "/home/me/.xuya/agent-providers.sqlite.bak",
+    "/home/me/.config/../.codex/auth.json",
+  ])("denies reads and writes for %s", (path) => {
+    expect(checkReadable(path)).toMatchObject({ ok: false });
+    expect(checkWritable(path)).toMatchObject({ ok: false });
+  });
+
+  it.each([
+    "/repo/src/auth.json",
+    "/repo/settings.json",
+    "/repo/.codex/skills/helper/SKILL.md",
+    "/repo/.claude/commands/check.md",
+    "/repo/.claude/CLAUDE.md",
+    "/repo/.codex/auth.json-schema.ts",
+    "/repo/.codexx/auth.json",
+    "/repo/.claudex/settings.json",
+    "/repo/.xuya/agent-providers.sqlite-schema.ts",
+  ])("preserves normal project access to %s", (path) => {
+    expect(checkReadable(path)).toMatchObject({ ok: true });
+  });
+
+  it.each([
+    ".ssh/config",
+    "server.key/",
+    "C:.env",
+  ])("does not bypass basename/directory checks with %s", (path) =>
+    expect(checkReadable(path)).toMatchObject({ ok: false }));
+});
+
+describe("canonical read failures and traversal", () => {
+  it("denies reads if canonicalization fails", async () => {
+    const result = await checkReadableCanonical("/repo/alias.txt", async () => {
+      throw new Error("cannot resolve path");
+    });
+    expect(result).toMatchObject({ ok: false, reason: expect.any(String) });
+  });
+
+  it.each([
+    ["/repo/alias.txt", "/home/me/.codex/auth.json"],
+    ["/repo/alias.txt", "/home/me/.claude/settings.json"],
+    ["/repo/../.claude/./settings.json", "/.claude/settings.json"],
+    ["/repo/alias.txt", "/home/me/.xuya/agent-providers.sqlite"],
+  ])("rechecks %s resolved to %s", async (path, canonical) => {
+    expect(
+      await checkReadableCanonical(path, async () => canonical),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("returns the native canonical spelling for ordinary files", async () => {
+    const canonical = "D:/Projects/Example/src/Main.ts";
+    expect(
+      await checkReadableCanonical(
+        "D:/Projects/link.ts",
+        async () => canonical,
+      ),
+    ).toEqual({ ok: true, canonical });
+  });
+});
+
+describe("write compatibility with shared read restrictions", () => {
+  it("keeps creating ordinary files through a canonical parent", async () => {
+    const result = await checkWritableCanonical(
+      "/repo/link/new.ts",
+      async (path) => {
+        if (path.endsWith("new.ts")) throw new Error("not found");
+        return "/repo/src";
+      },
+    );
+    expect(result).toEqual({ ok: true, canonical: "/repo/src/new.ts" });
+  });
+
+  it("blocks creating a credential through a symlinked parent", async () => {
+    const result = await checkWritableCanonical(
+      "/repo/link/auth.json",
+      async (path) => {
+        if (path.endsWith("auth.json")) throw new Error("not found");
+        return "/home/me/.codex";
+      },
+    );
+    expect(result).toMatchObject({ ok: false });
+  });
+
+  it("does not collapse parent traversal before native symlink resolution", async () => {
+    const path = "/repo/link/../auth.json";
+    const canonicalize = vi.fn(async () => "/home/me/.codex/auth.json");
+    expect(await checkReadableCanonical(path, canonicalize)).toMatchObject({
+      ok: false,
+    });
+    expect(canonicalize).toHaveBeenCalledWith(path);
+  });
+
+  it.each([
+    "\\\\?\\UNC\\server\\share\\.codex\\auth.json",
+    "C:\\Users\\me\\.claude. \\settings.json::$DATA",
+    "./.claude/./settings.local.json",
+    "/home/me/.xuya/agent-providers.sqlite-journal",
+    "/home/me/.xuya/agent-providers.sqlite-wal.bak",
+  ])("protects platform and sidecar path %s", (path) => {
+    expect(checkReadable(path)).toMatchObject({ ok: false });
+  });
+
+  it("accepts benign traversal only after checking its resolved path", async () => {
+    expect(
+      await checkReadableCanonical(
+        "/repo/src/../README.md",
+        async () => "/repo/README.md",
+      ),
+    ).toEqual({ ok: true, canonical: "/repo/README.md" });
+  });
+});
+
+describe("credential backup suffixes", () => {
+  it.each([
+    "/home/me/.codex/auth.json-backup",
+    "/home/me/.codex/auth.json-bak",
+    "/home/me/.claude/settings.json-backup",
+    "/home/me/.claude/.credentials.json-backup",
+    "/home/me/.xuya/agent-providers.sqlite-backup",
+    "/home/me/.xuya/agent-providers.sqlite-wal-backup",
+  ])("blocks common backup copy %s", (path) => {
+    expect(checkReadable(path)).toMatchObject({ ok: false });
+  });
+
+  it.each([
+    "/mnt/c/Windows/System32/config",
+    "/mnt/d/Program Files/App/config",
+  ])("preserves Windows system-write denial for WSL path %s", (path) => {
+    expect(checkWritable(path)).toMatchObject({ ok: false });
+  });
+});
+
+describe("real filesystem canonical checks", () => {
+  const fixturePrefix = join(tmpdir(), "xuya-ai-safety-");
+  let fixtureRoot: string;
+  beforeAll(async () => {
+    fixtureRoot = await mkdtemp(fixturePrefix);
+    await mkdir(join(fixtureRoot, ".codex"));
+    await mkdir(join(fixtureRoot, "src"));
+    await writeFile(
+      join(fixtureRoot, ".codex", "auth.json"),
+      "SYNTHETIC_TOKEN",
+    );
+    await writeFile(
+      join(fixtureRoot, "src", "main.ts"),
+      "export const safe = true;",
+    );
+    // Junctions need no symlink privilege on Windows; Unix uses directory links.
+    const kind = process.platform === "win32" ? "junction" : "dir";
+    await symlink(
+      join(fixtureRoot, ".codex"),
+      join(fixtureRoot, "alias"),
+      kind,
+    );
+    await symlink(join(fixtureRoot, "src"), join(fixtureRoot, "source"), kind);
+  });
+  afterAll(async () => {
+    if (fixtureRoot?.startsWith(fixturePrefix)) {
+      await rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks a real directory alias into a credential file", async () => {
+    expect(
+      await checkReadableCanonical(
+        join(fixtureRoot, "alias", "auth.json"),
+        realpath,
+      ),
+    ).toMatchObject({ ok: false });
+  });
+
+  it("allows a real directory alias to normal source", async () => {
+    const path = join(fixtureRoot, "source", "main.ts");
+    expect(await checkReadableCanonical(path, realpath)).toEqual({
+      ok: true,
+      canonical: await realpath(path),
+    });
+  });
+
+  it("rejects missing files without an unverified read fallback", async () => {
+    expect(
+      await checkReadableCanonical(join(fixtureRoot, "missing.ts"), realpath),
+    ).toMatchObject({ ok: false });
   });
 });

@@ -1,3 +1,4 @@
+import { currentWorkspaceEnv } from "@/modules/workspace";
 import { tool } from "ai";
 import { z } from "zod";
 import { native } from "../lib/native";
@@ -23,9 +24,7 @@ export function buildFsTools(ctx: ToolContext) {
       description:
         "读取 UTF-8 文本文件。默认读取前 2000 行（上限 25KB）。传递 `offset`/`limit` 可对大文件进行基于行的窗口读取。拒绝二进制、超大或敏感文件（.env、密钥、凭证）。如果在同一会话中对同一路径连续调用两次且中间没有编辑，第二次调用将返回 `unchanged: true` 而非重新输出内容 -- 请重新阅读之前的结果。",
       inputSchema: z.object({
-        path: z
-          .string()
-          .describe("绝对路径，或相对于活动终端工作目录。"),
+        path: z.string().describe("绝对路径，或相对于活动终端工作目录。"),
         offset: z
           .number()
           .int()
@@ -41,12 +40,15 @@ export function buildFsTools(ctx: ToolContext) {
           .describe("最大返回行数。默认 2000。"),
       }),
       execute: async ({ path, offset, limit }) => {
+        const workspace = currentWorkspaceEnv();
         const reqPath = resolvePath(path, ctx.getCwd());
-        const safety = await checkReadableCanonical(reqPath, native.canonicalize);
+        const safety = await checkReadableCanonical(reqPath, (path) =>
+          native.canonicalize(path, workspace),
+        );
         if (!safety.ok) return { error: safety.reason, path: reqPath };
         const abs = safety.canonical;
         try {
-          const r = await native.readFile(abs);
+          const r = await native.readFile(abs, workspace);
           if (r.kind === "binary")
             return { error: "拒绝: 二进制文件", path: abs, size: r.size };
           if (r.kind === "toolarge")
@@ -58,7 +60,12 @@ export function buildFsTools(ctx: ToolContext) {
           const hash = djb2(r.content);
           const isFullRead = offset === undefined && limit === undefined;
           const prior = ctx.readCache.get(abs);
-          if (isFullRead && prior && prior.size === r.size && prior.hash === hash) {
+          if (
+            isFullRead &&
+            prior &&
+            prior.size === r.size &&
+            prior.hash === hash
+          ) {
             return { path: abs, unchanged: true, size: r.size };
           }
           ctx.readCache.set(abs, { size: r.size, hash });
@@ -78,7 +85,10 @@ export function buildFsTools(ctx: ToolContext) {
               size: r.size,
               total_lines: lines.length,
               ...(truncated
-                ? { truncated: true, hint: "请使用 offset 调用 read_file 以继续读取" }
+                ? {
+                    truncated: true,
+                    hint: "请使用 offset 调用 read_file 以继续读取",
+                  }
                 : {}),
             };
           }
@@ -109,20 +119,20 @@ export function buildFsTools(ctx: ToolContext) {
     }),
 
     list_directory: tool({
-      description:
-        "列出目录中的直接条目（文件 + 目录）。隐藏条目不包含在内。",
+      description: "列出目录中的直接条目（文件 + 目录）。隐藏条目不包含在内。",
       inputSchema: z.object({
-        path: z
-          .string()
-          .describe("绝对路径，或相对于活动终端工作目录。"),
+        path: z.string().describe("绝对路径，或相对于活动终端工作目录。"),
       }),
       execute: async ({ path }) => {
+        const workspace = currentWorkspaceEnv();
         const reqPath = resolvePath(path, ctx.getCwd());
-        const safety = await checkReadableCanonical(reqPath, native.canonicalize);
+        const safety = await checkReadableCanonical(reqPath, (path) =>
+          native.canonicalize(path, workspace),
+        );
         if (!safety.ok) return { error: safety.reason, path: reqPath };
         const abs = safety.canonical;
         try {
-          const entries = await native.readDir(abs);
+          const entries = await native.readDir(abs, workspace);
           return {
             path: abs,
             entries: entries.map((e) => ({ name: e.name, kind: e.kind })),
@@ -143,7 +153,10 @@ export function buildFsTools(ctx: ToolContext) {
       needsApproval: true,
       execute: async ({ path, content }) => {
         const reqPath = resolvePath(path, ctx.getCwd());
-        const safety = await checkWritableCanonical(reqPath, native.canonicalize);
+        const safety = await checkWritableCanonical(
+          reqPath,
+          native.canonicalize,
+        );
         if (!safety.ok) return { error: safety.reason, path: reqPath };
         const abs = safety.canonical;
 
@@ -182,15 +195,17 @@ export function buildFsTools(ctx: ToolContext) {
     }),
 
     create_directory: tool({
-      description:
-        "创建目录（包括缺失的父目录）。运行前始终询问用户。",
+      description: "创建目录（包括缺失的父目录）。运行前始终询问用户。",
       inputSchema: z.object({
         path: z.string(),
       }),
       needsApproval: true,
       execute: async ({ path }) => {
         const reqPath = resolvePath(path, ctx.getCwd());
-        const safety = await checkWritableCanonical(reqPath, native.canonicalize);
+        const safety = await checkWritableCanonical(
+          reqPath,
+          native.canonicalize,
+        );
         if (!safety.ok) return { error: safety.reason, path: reqPath };
         const abs = safety.canonical;
         if (usePlanStore.getState().active) {

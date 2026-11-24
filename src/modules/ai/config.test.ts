@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  type CustomEndpoint,
   compatModelIdForEndpoint,
   endpointIdFromCompatModel,
   getModelContextLimit,
   isCompatModelId,
-  migrateLegacyCompatEndpoint,
   type ModelInfo,
+  migrateLegacyCompatEndpoint,
   modelKeepsReasoning,
+  providerNeedsKey,
+  providerSupportsKey,
   resolveModel,
-  type CustomEndpoint,
 } from "./config";
 
 const endpoint: CustomEndpoint = {
@@ -18,6 +20,24 @@ const endpoint: CustomEndpoint = {
   modelId: "llama-3.3-70b",
   contextLimit: 64_000,
 };
+
+describe("provider credentials", () => {
+  it("allows compatible endpoints without requiring a key", () => {
+    expect(providerNeedsKey("openai-compatible")).toBe(false);
+    expect(providerSupportsKey("openai-compatible")).toBe(true);
+  });
+
+  it.each([
+    "deepseek",
+    "zhipu",
+    "minimax",
+    "kimi",
+    "xiaomimimo",
+  ] as const)("requires and supports keys for %s", (provider) => {
+    expect(providerNeedsKey(provider)).toBe(true);
+    expect(providerSupportsKey(provider)).toBe(true);
+  });
+});
 
 describe("compat model id helpers", () => {
   it("round-trips endpoint id through the synthetic model id", () => {
@@ -68,7 +88,9 @@ describe("getModelContextLimit", () => {
 
 describe("modelKeepsReasoning", () => {
   it("keeps reasoning for compat endpoints (freeform provider)", () => {
-    const info = resolveModel(compatModelIdForEndpoint(endpoint.id), [endpoint]);
+    const info = resolveModel(compatModelIdForEndpoint(endpoint.id), [
+      endpoint,
+    ]);
     expect(modelKeepsReasoning(info)).toBe(true);
   });
 

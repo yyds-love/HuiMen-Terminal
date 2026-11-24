@@ -10,7 +10,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Check release identity and versions
+        run: node scripts/check-release.mjs
+      - name: Require updater signing key
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "Configure TAURI_SIGNING_PRIVATE_KEY before releasing."
+            exit 1
+          fi
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify frontend and release tooling
+        run: |
+          pnpm check-types
+          pnpm test
+          pnpm test:release
+
   publish-tauri:
+    needs: preflight
     permissions:
       contents: write
     strategy:
@@ -60,17 +90,20 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: ./src-tauri -> target
+          workspaces: . -> target
           key: ${{ matrix.platform }}-${{ matrix.rust-target }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Test native services
+        run: cargo test --locked
+
       - name: Read release notes from changelog
         id: release_notes
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
           $changelog = Get-Content -Raw CHANGELOG.md
           $pattern = "(?s)## \[$([regex]::Escape($version))\][^\r\n]*(?:\r?\n)(.*?)(?=\r?\n## \[|\z)"
           $match = [regex]::Match($changelog, $pattern)
@@ -93,8 +126,8 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "XuYa Terminal ${{ github.ref_name }}"
           releaseBody: ${{ steps.release_notes.outputs.body }}
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} -- --locked

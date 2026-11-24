@@ -10,7 +10,22 @@ use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+mod persistence;
+#[cfg(test)]
+mod tests;
+
+// Tauri windows share this process. Hold the guard over the entire config
+// read/modify/write operation, including both Codex files and any rollback.
+static CONFIG_IO_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_config_io() -> Result<MutexGuard<'static, ()>, String> {
+    CONFIG_IO_LOCK.lock().map_err(|_| {
+        "Agent configuration lock was poisoned; restart before changing configuration".to_string()
+    })
+}
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -415,6 +430,7 @@ pub async fn fetch_agent_provider_quota(
 // ── Core Implementation ──────────────────────────────────────────────────────
 
 fn read_agent_config_state() -> Result<AgentConfigState, String> {
+    let _guard = lock_config_io()?;
     let home = home_dir().ok_or_else(|| "Failed to locate home directory".to_string())?;
     let claude_path = claude_settings_path(&home);
     let codex_path = codex_config_path(&home);
@@ -468,7 +484,7 @@ fn save_agent_custom_provider_inner(
     });
     let existing_api_key = existing_index
         .and_then(|index| clean_optional_text(Some(store.providers[index].api_key.as_str())));
-    let current_config_api_key = current_agent_api_key(&home, tool, requested_id.as_deref());
+    let current_config_api_key = current_agent_api_key(&home, tool, requested_id.as_deref())?;
     let api_key = clean_optional_text(request.api_key.as_deref())
         .or(existing_api_key)
         .or(current_config_api_key)
@@ -636,9 +652,18 @@ async fn fetch_agent_provider_models_inner(
             stored_built_in
                 .as_ref()
                 .and_then(|provider| clean_agent_api_key(tool, Some(provider.api_key.as_str())))
+        });
+    let api_key = if let Some(key) = api_key {
+        key
+    } else {
+        // Waiting for a config replacement must not block Tokio's async worker.
+        tokio::task::spawn_blocking(move || {
+            current_agent_api_key(&home, tool, custom_id.as_deref())
         })
-        .or_else(|| current_agent_api_key(&home, tool, custom_id.as_deref()))
-        .ok_or_else(|| "拉取模型前请填写 API 密钥".to_string())?;
+        .await
+        .map_err(|e| format!("Failed to read agent configuration: {e}"))??
+        .ok_or_else(|| "拉取模型前请填写 API 密钥".to_string())?
+    };
 
     let (endpoint, models) = fetch_openai_compatible_models(&base_url, &api_key).await?;
     Ok(AgentModelFetchResult { endpoint, models })
@@ -648,6 +673,7 @@ fn apply_claude_provider_config(
     home: &Path,
     request: AgentProviderConfigRequest,
 ) -> Result<AgentConfigApplyResult, String> {
+    let _guard = lock_config_io()?;
     let path = claude_settings_path(home);
     let provider_id = request.provider_id.trim().to_string();
     if provider_id.is_empty() {
@@ -880,6 +906,7 @@ fn apply_codex_provider_config(
     home: &Path,
     request: AgentProviderConfigRequest,
 ) -> Result<AgentConfigApplyResult, String> {
+    let _guard = lock_config_io()?;
     let path = codex_config_path(home);
     let auth_path = codex_auth_path(home);
     let provider_id = request.provider_id.trim().to_string();
@@ -928,7 +955,7 @@ fn apply_codex_provider_config(
     let provided_auth_api_key = provided_auth_config
         .as_ref()
         .and_then(extract_codex_auth_api_key);
-    let current = fs::read_to_string(&path).unwrap_or_default();
+    let current = read_text_or_empty(&path)?;
     let current_auth = read_json_or_empty_object(&auth_path)?;
     let current_auth_api_key = extract_codex_auth_api_key(&current_auth);
     let current_provider = extract_top_level_toml_string(&current, "model_provider");
@@ -1041,8 +1068,6 @@ fn apply_codex_provider_config(
     if !next.ends_with('\n') {
         next.push('\n');
     }
-    write_text_atomic(&path, &next)?;
-
     let auth_to_write = if provider_id == "official" {
         provided_auth_config
     } else {
@@ -1083,7 +1108,10 @@ fn apply_codex_provider_config(
         })
     };
     if let Some(auth) = auth_to_write {
-        write_json_pretty_atomic(&auth_path, &auth)?;
+        let auth_text = json_pretty_text(&auth_path, &auth)?;
+        persistence::write_files_atomic(&[(&path, &next), (&auth_path, &auth_text)])?;
+    } else {
+        write_text_atomic(&path, &next)?;
     }
 
     Ok(AgentConfigApplyResult {
@@ -1564,8 +1592,13 @@ fn clean_agent_api_key(tool: &str, value: Option<&str>) -> Option<String> {
     })
 }
 
-fn current_agent_api_key(home: &Path, tool: &str, custom_id: Option<&str>) -> Option<String> {
-    match tool {
+fn current_agent_api_key(
+    home: &Path,
+    tool: &str,
+    custom_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let _guard = lock_config_io()?;
+    Ok(match tool {
         "claude" => read_json_or_empty_object(&claude_settings_path(home))
             .ok()
             .and_then(|settings| extract_claude_api_key(&settings)),
@@ -1603,7 +1636,7 @@ fn current_agent_api_key(home: &Path, tool: &str, custom_id: Option<&str>) -> Op
                 })
         }
         _ => None,
-    }
+    })
 }
 
 async fn fetch_openai_compatible_models(
@@ -1731,6 +1764,7 @@ struct AgentQuotaLookup {
 fn resolve_agent_quota_lookup(
     request: AgentProviderQuotaRequest,
 ) -> Result<AgentQuotaLookup, String> {
+    let _guard = lock_config_io()?;
     let home = home_dir().ok_or_else(|| "Failed to locate home directory".to_string())?;
     let tool = parse_agent_tool(&request.tool)?.to_string();
     let provider_id = clean_optional_text(Some(request.provider_id.as_str()))
@@ -3113,15 +3147,19 @@ fn custom_provider_id_from_codex_provider_id(provider_id: &str) -> Option<String
 // ── JSON/TOML Utilities ──────────────────────────────────────────────────────
 
 fn read_json_or_empty_object(path: &Path) -> Result<Value, String> {
-    if !path.exists() {
-        return Ok(Value::Object(Map::new()));
-    }
-    let text =
-        fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let text = read_text_or_empty(path)?;
     if text.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
     serde_json::from_str(&text).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+}
+
+fn read_text_or_empty(path: &Path) -> Result<String, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("Failed to read {}: {e}", path.display())),
+    }
 }
 
 fn ensure_json_object(value: &mut Value) -> &mut Map<String, Value> {
@@ -3320,23 +3358,15 @@ fn is_codex_managed_top_level_key(key: &str) -> bool {
 }
 
 fn write_json_pretty_atomic(path: &Path, value: &Value) -> Result<(), String> {
+    write_text_atomic(path, &json_pretty_text(path, value)?)
+}
+
+fn json_pretty_text(path: &Path, value: &Value) -> Result<String, String> {
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| format!("Failed to serialize JSON for {}: {e}", path.display()))?;
-    write_text_atomic(path, &format!("{text}\n"))
+    Ok(format!("{text}\n"))
 }
 
 fn write_text_atomic(path: &Path, text: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {e}", parent.display()))?;
-    }
-
-    let tmp_path = path.with_extension(format!("{}.tmp", std::process::id()));
-    fs::write(&tmp_path, text)
-        .map_err(|e| format!("Failed to write {}: {e}", tmp_path.display()))?;
-    if path.exists() {
-        fs::remove_file(path).map_err(|e| format!("Failed to replace {}: {e}", path.display()))?;
-    }
-    fs::rename(&tmp_path, path).map_err(|e| format!("Failed to move {}: {e}", path.display()))?;
-    Ok(())
+    persistence::write_files_atomic(&[(path, text)])
 }

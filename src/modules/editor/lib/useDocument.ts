@@ -1,7 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
+import { invoke } from "@tauri-apps/api/core";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type ReadResult =
   | { kind: "text"; content: string; size: number }
@@ -20,46 +20,192 @@ type Options = {
   onDirtyChange?: (dirty: boolean) => void;
 };
 
+type DocumentSession = {
+  path: string;
+  workspace: WorkspaceEnv;
+  active: boolean;
+  doc: DocumentState;
+  saved: string;
+  buffer: string;
+  editRevision: number;
+  readVersion: number;
+  pendingWrites: number;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const LOADING: DocumentState = { status: "loading" };
+// Keep in-flight writes ordered even if a tab is closed and reopened.
+const pendingFileWrites = new Map<string, Promise<void>>();
+
+function fileKey({ path, workspace }: DocumentSession): string {
+  return JSON.stringify([
+    workspace.kind,
+    workspace.kind === "wsl" ? workspace.distro : null,
+    path,
+  ]);
+}
+
+function isDirty(session: DocumentSession): boolean {
+  // Even an undo to saved text is unsafe while another snapshot may reach disk.
+  return session.buffer !== session.saved || session.pendingWrites > 0;
+}
+
 export function useDocument({ path, onDirtyChange }: Options) {
-  const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
-  const [dirty, setDirty] = useState(false);
+  const session = useMemo<DocumentSession>(
+    () => ({
+      path,
+      workspace: { ...currentWorkspaceEnv() },
+      active: false,
+      doc: LOADING,
+      saved: "",
+      buffer: "",
+      editRevision: 0,
+      readVersion: 0,
+      pendingWrites: 0,
+      timer: null,
+    }),
+    [path],
+  );
+  const [state, setState] = useState({ session, doc: LOADING, dirty: false });
+  const publishedRef = useRef(state);
+  // Do not expose the previous file's content during a path-change render.
+  const doc = state.session === session ? state.doc : LOADING;
+  const dirty = state.session === session && state.dirty;
+  const publish = useCallback(() => {
+    if (!session.active) return;
+    const nextDirty = isDirty(session);
+    const previous = publishedRef.current;
+    // Buffer-only changes must not rerender the editor on every keystroke.
+    if (
+      previous.session === session &&
+      previous.doc === session.doc &&
+      previous.dirty === nextDirty
+    ) {
+      return;
+    }
+    const next = { session, doc: session.doc, dirty: nextDirty };
+    publishedRef.current = next;
+    setState(next);
+  }, [session]);
 
   const autoSave = usePreferencesStore((s) => s.editorAutoSave);
   const autoSaveDelay = usePreferencesStore((s) => s.editorAutoSaveDelay);
-
-  // Track the saved buffer so we can detect changes cheaply.
-  const savedRef = useRef<string>("");
-  const bufferRef = useRef<string>("");
-  const dirtyRef = useRef(false);
-  useEffect(() => {
-    dirtyRef.current = dirty;
-  }, [dirty]);
-
   const autoSaveRef = useRef({ autoSave, autoSaveDelay });
   autoSaveRef.current = { autoSave, autoSaveDelay };
 
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const clearAutoSaveTimer = useCallback(() => {
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
+    if (session.timer !== null) {
+      clearTimeout(session.timer);
+      session.timer = null;
     }
-  }, []);
+  }, [session]);
 
-  const saveNow = useCallback(async () => {
-    const content = bufferRef.current;
-    await invoke("fs_write_file", {
-      path,
-      content,
-      workspace: currentWorkspaceEnv(),
-      source: "editor",
+  const saveNow = useCallback((): Promise<void> => {
+    if (
+      !session.active ||
+      session.doc.status !== "ready" ||
+      !isDirty(session)
+    ) {
+      return Promise.resolve();
+    }
+    const content = session.buffer;
+    // A save invalidates any read started before it, including watcher reloads.
+    session.readVersion += 1;
+    session.pendingWrites += 1;
+    publish();
+    const key = fileKey(session);
+    const previousWrite = pendingFileWrites.get(key) ?? Promise.resolve();
+    const write = previousWrite
+      .then(async () => {
+        // Already-started IPC cannot be cancelled; discard only queued writes.
+        if (!session.active || content === session.saved) return;
+        await invoke("fs_write_file", {
+          path: session.path,
+          content,
+          workspace: session.workspace,
+          source: "editor",
+        });
+        if (session.active) session.saved = content;
+      })
+      .finally(() => {
+        session.pendingWrites -= 1;
+        publish();
+      });
+    // Recover the queue, but preserve rejection for the caller to handle.
+    const tail = write.catch(() => {});
+    pendingFileWrites.set(key, tail);
+    void tail.then(() => {
+      if (pendingFileWrites.get(key) === tail) pendingFileWrites.delete(key);
     });
-    savedRef.current = content;
-    setDirty(false);
-  }, [path]);
+    return write;
+  }, [session, publish]);
 
-  // Notify parent of dirty transitions.
+  const read = useCallback(() => {
+    const version = ++session.readVersion;
+    const revision = session.editRevision;
+    const canApply = () =>
+      session.active &&
+      version === session.readVersion &&
+      revision === session.editRevision &&
+      !isDirty(session);
+    const pendingWrite = pendingFileWrites.get(fileKey(session));
+    const load = async () => {
+      try {
+        // Reopened tabs must read after an older lifecycle's native write.
+        if (pendingWrite) await pendingWrite;
+        if (!canApply()) return;
+        const res = await invoke<ReadResult>("fs_read_file", {
+          path: session.path,
+          workspace: session.workspace,
+        });
+        if (!canApply()) return;
+        if (res.kind === "text") {
+          // Duplicate watcher events must not reset CodeMirror's undo state.
+          if (session.doc.status === "ready" && res.content === session.saved) {
+            return;
+          }
+          session.saved = res.content;
+          session.buffer = res.content;
+          session.doc = {
+            status: "ready",
+            content: res.content,
+            size: res.size,
+          };
+        } else if (res.kind === "binary") {
+          session.doc = { status: "binary", size: res.size };
+        } else {
+          session.doc = {
+            status: "toolarge",
+            size: res.size,
+            limit: res.limit,
+          };
+        }
+        publish();
+      } catch (error) {
+        if (!canApply()) return;
+        if (session.doc.status === "ready") {
+          // A transient watcher/read failure must not unmount an editable view.
+          console.error("[editor reload]", error);
+          return;
+        }
+        session.doc = { status: "error", message: String(error) };
+        publish();
+      }
+    };
+    void load();
+  }, [session, publish]);
+
+  useEffect(() => {
+    session.active = true;
+    publish();
+    read();
+    return () => {
+      session.active = false;
+      session.readVersion += 1;
+      clearAutoSaveTimer();
+    };
+  }, [session, publish, read, clearAutoSaveTimer]);
+
   const onDirtyChangeRef = useRef(onDirtyChange);
   useEffect(() => {
     onDirtyChangeRef.current = onDirtyChange;
@@ -68,92 +214,38 @@ export function useDocument({ path, onDirtyChange }: Options) {
     onDirtyChangeRef.current?.(dirty);
   }, [dirty]);
 
-  // Load on path change or explicit reload.
-  useEffect(() => {
-    let cancelled = false;
-    setDoc({ status: "loading" });
-    setDirty(false);
-
-    invoke<ReadResult>("fs_read_file", { path, workspace: currentWorkspaceEnv() })
-      .then((res) => {
-        if (cancelled) return;
-        if (res.kind === "text") {
-          savedRef.current = res.content;
-          bufferRef.current = res.content;
-          setDoc({
-            status: "ready",
-            content: res.content,
-            size: res.size,
-          });
-        } else if (res.kind === "binary") {
-          setDoc({ status: "binary", size: res.size });
-        } else if (res.kind === "toolarge") {
-          setDoc({
-            status: "toolarge",
-            size: res.size,
-            limit: res.limit,
-          });
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) setDoc({ status: "error", message: String(e) });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [path]);
-
-  // Skipped while dirty (never clobber unsaved edits) and when disk already
-  // matches the buffer (self-save / duplicate watcher event → no re-render).
   const reload = useCallback((): boolean => {
-    if (dirtyRef.current) return false;
-    void invoke<ReadResult>("fs_read_file", {
-      path,
-      workspace: currentWorkspaceEnv(),
-    })
-      .then((res) => {
-        if (res.kind === "text") {
-          if (res.content === savedRef.current) return;
-          savedRef.current = res.content;
-          bufferRef.current = res.content;
-          setDirty(false);
-          setDoc({ status: "ready", content: res.content, size: res.size });
-        } else if (res.kind === "binary") {
-          setDoc({ status: "binary", size: res.size });
-        } else if (res.kind === "toolarge") {
-          setDoc({ status: "toolarge", size: res.size, limit: res.limit });
-        }
-      })
-      .catch((e) => setDoc({ status: "error", message: String(e) }));
+    if (!session.active || isDirty(session)) return false;
+    read();
     return true;
-  }, [path]);
+  }, [session, read]);
 
-  const save = useCallback(async () => {
+  const save = useCallback(() => {
     clearAutoSaveTimer();
-    if (!dirty) return;
-    await saveNow();
-  }, [dirty, clearAutoSaveTimer, saveNow]);
+    return saveNow();
+  }, [clearAutoSaveTimer, saveNow]);
 
   const onChange = useCallback(
     (next: string) => {
-      bufferRef.current = next;
-      const isDirty = next !== savedRef.current;
-      setDirty(isDirty);
-
+      if (!session.active || session.doc.status !== "ready") return;
+      if (next !== session.buffer) session.editRevision += 1;
+      session.buffer = next;
+      publish();
       clearAutoSaveTimer();
-
       const { autoSave: active, autoSaveDelay: delay } = autoSaveRef.current;
-      if (active && isDirty) {
-        timeoutRef.current = setTimeout(() => {
-          saveNow().catch((e) => console.error("[autosave]", e));
+      if (active && isDirty(session)) {
+        session.timer = setTimeout(() => {
+          session.timer = null;
+          saveNow().catch((error) => console.error("[autosave]", error));
         }, delay);
       }
     },
-    [clearAutoSaveTimer, saveNow],
+    [session, publish, clearAutoSaveTimer, saveNow],
   );
 
-  useEffect(() => clearAutoSaveTimer, [path, clearAutoSaveTimer]);
+  useEffect(() => {
+    if (!autoSave) clearAutoSaveTimer();
+  }, [autoSave, clearAutoSaveTimer]);
 
   return { doc, dirty, onChange, save, reload };
 }

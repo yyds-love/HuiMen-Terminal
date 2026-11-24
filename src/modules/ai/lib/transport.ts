@@ -1,8 +1,26 @@
-import type { UIMessage } from "ai";
+import {
+  type ChatTransport,
+  convertToModelMessages,
+  stepCountIs,
+  streamText,
+  type UIMessage,
+} from "ai";
+import {
+  type CustomEndpoint,
+  endpointIdFromCompatModel,
+  getModelContextLimit,
+  MAX_AGENT_STEPS,
+  selectSystemPrompt,
+} from "../config";
 import type { ToolContext } from "../tools/context";
-import type { ProviderKeys, CustomEndpointKeys } from "./keyring";
-import { buildLanguageModel, runAgent, type AgentUsage, type AgentUsageDelta } from "./agent";
-import type { CustomEndpoint, ProviderId } from "../config";
+import { buildTools } from "../tools/tools";
+import {
+  type AgentUsage,
+  type AgentUsageDelta,
+  buildConfiguredLanguageModel,
+} from "./agent";
+import { compactModelMessagesDetailed } from "./compact";
+import type { CustomEndpointKeys, ProviderKeys } from "./keyring";
 
 export type { AgentUsage, AgentUsageDelta };
 
@@ -18,11 +36,6 @@ export type Live = {
   readAgentOutput: (leafId: number) => string | null;
   readCache: Map<string, { size: number; hash: number }>;
   getSessionId: () => string | null;
-};
-
-export type SendOptions = {
-  messages: UIMessage[];
-  signal?: AbortSignal;
 };
 
 export type TransportDeps = {
@@ -58,51 +71,112 @@ function formatEnvBlock(live: Live): string | null {
   return parts.length ? `<env>\n${parts.join("\n")}\n</env>` : null;
 }
 
-function injectEnvIntoLastUser(messages: UIMessage[], envBlock: string): UIMessage[] {
-  if (!messages.length) return messages;
-  const last = messages[messages.length - 1];
-  if (last.role !== "user") return messages;
+function injectEnvIntoLastUser(
+  messages: UIMessage[],
+  envBlock: string,
+): UIMessage[] {
+  let index = messages.length - 1;
+  while (index >= 0 && messages[index].role !== "user") index--;
+  if (index < 0) return messages;
+  const last = messages[index];
   // UIMessage content is an array of parts, prepend env block as text
   const updated = {
     ...last,
-    parts: [
-      { type: "text" as const, text: `${envBlock}\n\n` },
-      ...last.parts,
-    ],
+    parts: [{ type: "text" as const, text: `${envBlock}\n\n` }, ...last.parts],
   };
-  return [...messages.slice(0, -1), updated];
+  return [...messages.slice(0, index), updated, ...messages.slice(index + 1)];
 }
 
-export function createTransport(deps: TransportDeps) {
+export function createTransport(deps: TransportDeps): ChatTransport<UIMessage> {
   return {
-    async send(options: SendOptions): Promise<void> {
+    async sendMessages({ messages, abortSignal }) {
+      abortSignal?.throwIfAborted();
+      // Resolve once per request, so a settings change cannot reroute its
+      // continuation to another model or endpoint mid-stream.
+      const modelId = deps.getModelId();
+      const endpoints = deps.getCustomEndpoints?.();
+      const compatibleContextLimit = deps.getOpenaiCompatibleContextLimit?.();
+      const system = [
+        selectSystemPrompt(modelId),
+        deps.getAgentPersona(),
+        deps.getCustomInstructions(),
+        deps.getPlanMode?.()
+          ? "Plan mode is active. Approved file edits are queued for review; do not claim they have been applied."
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       const live = deps.getLive();
       const envBlock = formatEnvBlock(live);
       const messagesForRun = envBlock
-        ? injectEnvIntoLastUser(options.messages, envBlock)
-        : options.messages;
-
-      const model = await buildLanguageModel(
-        deps.getModelId(),
-        "deepseek" as ProviderId,
+        ? injectEnvIntoLastUser(messages, envBlock)
+        : messages;
+      const tools = buildTools(deps.toolContext);
+      const model = await buildConfiguredLanguageModel(
+        modelId,
         deps.getKeys(),
-        deps.getModelId(),
         {
           openaiCompatibleBaseURL: deps.getOpenaiCompatibleBaseURL?.(),
+          openaiCompatibleModelId: deps.getOpenaiCompatibleModelId?.(),
+          customEndpoints: endpoints,
+          customEndpointKeys: deps.getCustomEndpointKeys?.(),
         },
       );
-
-      const result = await runAgent(
-        model,
-        messagesForRun,
-        deps.toolContext,
-        { signal: options.signal },
-      );
-
-      deps.onFinishMeta({
-        finishReason: result.finishReason,
-        steps: result.steps,
+      abortSignal?.throwIfAborted();
+      const modelMessages = await convertToModelMessages(messagesForRun, {
+        tools,
+        ignoreIncompleteToolCalls: true,
       });
+      abortSignal?.throwIfAborted();
+      const endpointLimit = endpoints?.find(
+        (ep) => ep.id === endpointIdFromCompatModel(modelId),
+      )?.contextLimit;
+      const contextLimit = getModelContextLimit(
+        modelId,
+        endpointLimit ?? compatibleContextLimit,
+      );
+      let failed = false;
+      const result = streamText({
+        model,
+        system,
+        messages: modelMessages,
+        tools,
+        abortSignal,
+        stopWhen: stepCountIs(MAX_AGENT_STEPS),
+        prepareStep: ({ messages: stepMessages }) => {
+          const compact = compactModelMessagesDetailed(
+            stepMessages,
+            contextLimit,
+          );
+          if (compact.compacted)
+            deps.onCompact({ droppedCount: compact.droppedCount });
+          return { messages: compact.messages };
+        },
+        onStepFinish: ({ toolCalls, usage }) => {
+          if (abortSignal?.aborted) return;
+          for (const call of toolCalls) deps.onStep(call.toolName);
+          deps.onUsage({
+            inputTokens: usage.inputTokens ?? 0,
+            outputTokens: usage.outputTokens ?? 0,
+            cachedInputTokens: usage.inputTokenDetails.cacheReadTokens ?? 0,
+            reasoningTokens: usage.outputTokenDetails.reasoningTokens ?? 0,
+            totalTokens: usage.totalTokens ?? 0,
+          });
+        },
+        onError: () => {
+          failed = true;
+        },
+        onFinish: ({ finishReason, steps }) => {
+          if (!failed && !abortSignal?.aborted) {
+            deps.onFinishMeta({ finishReason, steps: steps.length });
+          }
+        },
+      });
+      return result.toUIMessageStream({ originalMessages: messages });
+    },
+    async reconnectToStream() {
+      // Requests execute in-process; there is no persisted server stream.
+      return null;
     },
   };
 }

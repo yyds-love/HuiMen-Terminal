@@ -39,7 +39,8 @@ export const PROVIDERS: readonly ProviderInfo[] = [
     label: "MiniMax",
     keyringAccount: "minimax-api-key",
     keyPrefix: null,
-    consoleUrl: "https://platform.minimaxi.com/user-center/basic-information/interface-key",
+    consoleUrl:
+      "https://platform.minimaxi.com/user-center/basic-information/interface-key",
   },
   {
     id: "kimi",
@@ -302,7 +303,10 @@ const FREEFORM_PROVIDERS: ReadonlySet<ProviderId> = new Set([
 
 // Reasoning models reject tool-call turns whose reasoning was stripped; keep it.
 export function modelKeepsReasoning(m: ModelInfo): boolean {
-  return (m.tags?.includes("reasoning") ?? false) || FREEFORM_PROVIDERS.has(m.provider);
+  return (
+    (m.tags?.includes("reasoning") ?? false) ||
+    FREEFORM_PROVIDERS.has(m.provider)
+  );
 }
 
 export const DEFAULT_MODEL_ID: ModelId = "deepseek-v4-pro";
@@ -369,7 +373,11 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 
 export function estimateCost(
   modelId: string | undefined,
-  usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number },
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedInputTokens: number;
+  },
 ): number | null {
   if (!modelId) return null;
   const p = MODEL_PRICING[modelId];
@@ -377,17 +385,19 @@ export function estimateCost(
   const fresh = Math.max(0, usage.inputTokens - usage.cachedInputTokens);
   const cached = usage.cachedInputTokens;
   return (
-    (fresh * p.input + cached * (p.cacheRead ?? p.input) + usage.outputTokens * p.output) /
+    (fresh * p.input +
+      cached * (p.cacheRead ?? p.input) +
+      usage.outputTokens * p.output) /
     1_000_000
   );
 }
 
-export function providerNeedsKey(_id: ProviderId): boolean {
-  return true;
+export function providerNeedsKey(id: ProviderId): boolean {
+  return !getProvider(id).keyOptional;
 }
 
 export function providerSupportsKey(id: ProviderId): boolean {
-  return providerNeedsKey(id);
+  return providerNeedsKey(id) || getProvider(id).keyOptional === true;
 }
 
 export const OPENAI_COMPATIBLE_DEFAULT_BASE_URL = "";
@@ -400,7 +410,7 @@ export const MLX_DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1";
 export const DEFAULT_AUTOCOMPLETE_MODEL = "deepseek-v4-flash";
 export type AutocompleteProviderId = ProviderId;
 export function getAutocompleteEligibleModels(): ModelInfo[] {
-  return MODELS.filter(m => m.capabilities.speed >= 4);
+  return MODELS.filter((m) => m.capabilities.speed >= 4);
 }
 
 export const SYSTEM_PROMPT = `You are XuYa Terminal, an AI agent embedded in a developer terminal emulator. You are a hands-on engineer, not a chat bot — your job is to *do* the work, not narrate it.

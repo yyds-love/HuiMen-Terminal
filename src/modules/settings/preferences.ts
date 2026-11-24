@@ -3,16 +3,17 @@ import {
   DEFAULT_PREFERENCES,
   loadPreferences,
   onPreferencesChange,
+  type PrefKey,
   type Preferences,
 } from "./store";
 
 type State = Preferences & {
   hydrated: boolean;
-  /** Subscribe & hydrate. Idempotent — safe to call from multiple windows. */
+  /** Subscribe & hydrate once per window; failed attempts may be retried. */
   init: () => Promise<void>;
 };
 
-let initialized = false;
+let initialization: Promise<void> | undefined;
 
 const FAST_BG_KIND_KEY = "terax-ui-bg-kind-shadow";
 const FAST_BG_IMAGE_ID_KEY = "terax-ui-bg-image-shadow";
@@ -45,21 +46,48 @@ export function readBgFastPath(): {
   }
 }
 
-export const usePreferencesStore = create<State>((set) => ({
+export const usePreferencesStore = create<State>((set, get) => ({
   ...DEFAULT_PREFERENCES,
   hydrated: false,
-  init: async () => {
-    if (initialized) return;
-    initialized = true;
-    const prefs = await loadPreferences();
-    set({ ...prefs, hydrated: true });
-    mirrorBgFastPath(prefs.backgroundKind, prefs.backgroundImageId);
-    void onPreferencesChange((key, value) => {
-      set({ [key]: value } as Partial<State>);
-      if (key === "backgroundKind" || key === "backgroundImageId") {
-        const s = usePreferencesStore.getState();
-        mirrorBgFastPath(s.backgroundKind, s.backgroundImageId);
+  init: () => {
+    initialization ??= (async () => {
+      let active = true;
+      let loading = true;
+      const pending = new Map<PrefKey, unknown>();
+      let unlisten: Awaited<ReturnType<typeof onPreferencesChange>> | undefined;
+      const mirrorBackground = () => {
+        const { backgroundKind, backgroundImageId } = get();
+        mirrorBgFastPath(backgroundKind, backgroundImageId);
+      };
+      try {
+        unlisten = await onPreferencesChange((key, value) => {
+          if (!active) return;
+          if (loading) {
+            pending.set(key, value);
+            return;
+          }
+          set({ [key]: value } as Partial<Preferences>);
+          if (key === "backgroundKind" || key === "backgroundImageId") {
+            mirrorBackground();
+          }
+        });
+        // Earlier events are already reflected in the upcoming snapshot.
+        // Only changes received during its read must overlay that snapshot.
+        pending.clear();
+        const prefs = await loadPreferences();
+        const updates = Object.fromEntries(pending);
+        loading = false;
+        set({ ...prefs, ...updates, hydrated: true });
+        mirrorBackground();
+      } catch (error) {
+        active = false;
+        await unlisten?.();
+        throw error;
       }
+    })().catch((error: unknown) => {
+      initialization = undefined;
+      throw error;
     });
+    return initialization;
   },
 }));

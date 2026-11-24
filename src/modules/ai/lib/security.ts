@@ -15,7 +15,7 @@
  *
  * Defense-in-depth notes:
  *  - Comparison surface is lowercased *only for matching*. Original path is
- *    preserved for basename pattern checks and error messages.
+ *    preserved for filesystem calls; guards never open the comparison form.
  *  - Windows drive prefix (e.g. `C:`) is stripped from the comparison form so
  *    Unix-style root prefix checks behave consistently on both platforms.
  *  - Protected directories match exact-equal-or-descendant, not raw
@@ -56,6 +56,14 @@ const SECRET_BASENAME_PATTERNS: RegExp[] = [
   /^\.pypirc(?:[.\s:]|$)/i,
   /^secrets?\.(json|ya?ml|toml|env)(?:[.\s:]|$)/i,
   /^service[-_]?account.*\.json(?:[.\s:]|$)/i, // GCP service account keys
+];
+
+// Target files, not entire agent directories: project instructions remain readable.
+// Include common backups, and SQLite sidecars that can contain provider secrets.
+const PROTECTED_FILE_PATTERNS: RegExp[] = [
+  /\/\.codex\/auth\.json(?:[._~]|-(?:backup|bak|old|copy)(?:[._~-]|$)|$)/,
+  /\/\.claude\/(?:settings(?:\.local)?|\.credentials)\.json(?:[._~]|-(?:backup|bak|old|copy)(?:[._~-]|$)|$)/,
+  /\/\.xuya\/agent-providers\.sqlite(?:-(?:wal|shm|journal))?(?:[._~]|-(?:backup|bak|old|copy)(?:[._~-]|$)|$)/,
 ];
 
 /**
@@ -99,7 +107,7 @@ const PROTECTED_DIRS = [
 
 /**
  * Write-only deny prefixes (system locations). Read access is *not* universally
- * blocked — reading `/etc/hosts` is fine; writing to it isn't.
+ * blocked by this list; read restrictions above still apply.
  */
 const WRITE_DENY_PREFIXES = [
   "/etc/",
@@ -149,33 +157,17 @@ function basename(p: string): string {
  */
 function comparisonForm(p: string): string {
   let s = p.replace(/\\/g, "/");
-  // UNC / extended-length prefix: \\?\C:\... or //?/C:/... → strip up to drive.
-  s = s.replace(/^\/\/\?\//, "/");
-  // Drive prefix: C:/foo → /foo. Important: do this BEFORE lowercasing so we
-  // don't have to special-case "c:" vs "C:".
+  s = s.replace(/^\/\/\?\/UNC\//i, "//").replace(/^\/\/\?\//, "");
   s = s.replace(/^[a-zA-Z]:/, "");
-  // Strip NTFS alternate-data-stream syntax from each segment. `name:stream`
-  // and `name::$DATA` both read the same underlying file from `name`, so
-  // they must compare-equal to `name`.
-  s = s
-    .split("/")
-    .map((seg) => {
-      const colon = seg.indexOf(":");
-      return colon === -1 ? seg : seg.slice(0, colon);
-    })
-    .join("/");
-  // Strip trailing dots/spaces from each segment (Windows behavior).
-  s = s
-    .split("/")
-    .map((seg) => seg.replace(/[.\s]+$/, ""))
-    .join("/");
-  // Collapse duplicate slashes (//foo → /foo). Preserve a possible leading
-  // single slash.
-  s = s.replace(/\/{2,}/g, "/");
-  s = s.toLowerCase();
-  // Drop trailing slash so "/foo/" and "/foo" compare equal.
-  if (s.length > 1 && s.endsWith("/")) s = s.slice(0, -1);
-  return s;
+  const segments = s.split("/").map((segment) => {
+    const colon = segment.indexOf(":");
+    const name = colon === -1 ? segment : segment.slice(0, colon);
+    // Do not turn parent traversal into an empty segment. Only native
+    // canonicalization can resolve it correctly in the presence of symlinks.
+    return name === "." || name === ".." ? name : name.replace(/[.\s]+$/, "");
+  });
+  // A leading slash also lets relative `.ssh/config` match protected segments.
+  return `/${segments.filter((s) => s !== "" && s !== ".").join("/")}`.toLowerCase();
 }
 
 function isUnderProtected(cmp: string, dir: string): boolean {
@@ -187,7 +179,7 @@ function isUnderProtected(cmp: string, dir: string): boolean {
   //   "/users/me/.ssh/config" + "/" → contains "/.ssh/" ✓
   //   "/users/me/.ssh"        + "/" → contains "/.ssh/" ✓
   //   "/users/me/.sshx/file"  + "/" → does not contain "/.ssh/" ✓
-  return (cmp + "/").includes(dir + "/");
+  return `${cmp}/`.includes(`${dir}/`);
 }
 
 function describeProtected(dir: string): string {
@@ -205,7 +197,8 @@ export function checkReadable(path: string): SafetyResult {
     return { ok: false, reason: "拒绝: 路径包含控制字符。" };
   }
 
-  const base = basename(path);
+  const cmp = comparisonForm(path);
+  const base = basename(cmp);
   for (const re of SECRET_BASENAME_PATTERNS) {
     if (re.test(base)) {
       return {
@@ -215,7 +208,12 @@ export function checkReadable(path: string): SafetyResult {
     }
   }
 
-  const cmp = comparisonForm(path);
+  if (PROTECTED_FILE_PATTERNS.some((pattern) => pattern.test(cmp))) {
+    return {
+      ok: false,
+      reason: "拒绝: 路径匹配敏感的认证、配置或凭证数据库。",
+    };
+  }
   for (const dir of PROTECTED_DIRS) {
     if (isUnderProtected(cmp, dir)) {
       return {
@@ -233,11 +231,15 @@ export function checkWritable(path: string): SafetyResult {
   const r = checkReadable(path);
   if (!r.ok) return r;
 
-  const cmp = comparisonForm(path);
+  // WSL drive mounts address the same Windows system locations.
+  const cmp = comparisonForm(path).replace(/^\/mnt\/[a-z](?=\/|$)/, "");
   // Ensure the comparison surface has a leading separator for prefix matching.
   const cmpForPrefix = cmp.startsWith("/") ? cmp : `/${cmp}`;
   for (const prefix of WRITE_DENY_PREFIXES) {
-    if (cmpForPrefix.startsWith(prefix) || `${cmpForPrefix}/`.startsWith(prefix)) {
+    if (
+      cmpForPrefix.startsWith(prefix) ||
+      `${cmpForPrefix}/`.startsWith(prefix)
+    ) {
       return {
         ok: false,
         reason: `拒绝: 不允许写入 "${prefix.replace(/\/$/, "")}" 下。`,
@@ -255,12 +257,13 @@ export function checkWritable(path: string): SafetyResult {
  */
 /**
  * Two-phase safety check that also defends against symlink traversal: first
- * checks the literal path, then (if it exists) canonicalizes it via the
+ * checks the literal path, then requires canonicalization via the
  * native FS and re-checks the resolved path. A symlink at `./innocent.txt`
  * pointing into `~/.ssh/id_rsa` is caught on the second pass.
  *
  * Returns the canonical path on success so callers can use it for the actual
- * read — avoids TOCTOU between the safety check and the read.
+ * read. This reduces alias ambiguity; separate IPC calls are not an atomic
+ * filesystem transaction and cannot prevent concurrent path replacement.
  */
 export async function checkReadableCanonical(
   path: string,
@@ -272,8 +275,11 @@ export async function checkReadableCanonical(
   try {
     canonical = await canonicalize(path);
   } catch {
-    // Path doesn't exist yet — fine for the read tool to surface ENOENT.
-    return { ok: true, canonical: path };
+    // Auto-approved reads must not bypass symlink checks when resolution fails.
+    return {
+      ok: false,
+      reason: "拒绝: 无法验证真实路径，文件可能不存在或不可访问。",
+    };
   }
   // Always recheck — even when canonicalize returns the same string, the
   // checks themselves can have OS-specific gaps (NTFS streams, trailing
@@ -331,8 +337,7 @@ export function checkShellCommand(cmd: string): SafetyResult {
   if (/[\x00-\x1f]/.test(c)) {
     return {
       ok: false,
-      reason:
-        "拒绝: 命令包含控制字符（包括 CR/LF）。命令必须为单行。",
+      reason: "拒绝: 命令包含控制字符（包括 CR/LF）。命令必须为单行。",
     };
   }
   // Block Unicode bidi-override and invisible directional marks. These let an
@@ -353,8 +358,7 @@ export function checkShellCommand(cmd: string): SafetyResult {
   ) {
     return {
       ok: false,
-      reason:
-        "拒绝: 命令尝试递归删除文件系统根目录。",
+      reason: "拒绝: 命令尝试递归删除文件系统根目录。",
     };
   }
   // rm -rf ~ / $HOME / ${HOME}, with or without a trailing path — wiping the user's home dir

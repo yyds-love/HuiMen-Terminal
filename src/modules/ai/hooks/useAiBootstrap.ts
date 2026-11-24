@@ -73,13 +73,9 @@ export function useAiBootstrap(): {
     };
   }, [setApiKeys, setCustomEndpointKeys, prefsHydrated]);
 
-  // Hydrate the cross-window preference store and mirror the default model
-  // into chatStore so the dropdown reflects what the user picked in Settings.
-  const initPrefs = usePreferencesStore((s) => s.init);
+  // ThemeProvider initializes the shared preferences in each window. Mirror
+  // the hydrated default model so the dropdown follows the Settings choice.
   const prefDefaultModel = usePreferencesStore((s) => s.defaultModelId);
-  useEffect(() => {
-    void initPrefs();
-  }, [initPrefs]);
   useEffect(() => {
     if (!prefsHydrated) return;
     setSelectedModelId(prefDefaultModel);

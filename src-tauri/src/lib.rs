@@ -1,7 +1,7 @@
 pub mod modules;
 
 use modules::{
-    agent, agent_config, agent_session, fs, git, history, net, pty, secrets, shell, workspace,
+    agent, agent_config, agent_session, fs, git, history, net, pty, secrets, shell, updater, workspace,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -125,6 +125,7 @@ pub fn run() {
         .manage(pty::PtyState::default())
         .manage(shell::ShellState::default())
         .manage(secrets::SecretsState::default())
+        .manage(updater::UpdaterState::default())
         .manage(fs::watch::FsWatchState::default())
         .manage(history::HistoryState::default())
         .manage(fs::grep::ContentSearchState::default())
@@ -196,6 +197,7 @@ pub fn run() {
             workspace::workspace_current_dir,
             get_launch_dir,
             open_settings_window,
+            updater::updater_install,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
             agent_config::get_agent_config_state,

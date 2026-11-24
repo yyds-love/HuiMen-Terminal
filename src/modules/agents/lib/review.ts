@@ -1,7 +1,7 @@
 import { useChatStore } from "@/modules/ai/store/chatStore";
 import {
-  useManagedAgentsStore,
   type ManagedAgent,
+  useManagedAgentsStore,
 } from "../store/managedAgentsStore";
 
 function buildReviewDirective(m: ManagedAgent): string {
@@ -25,16 +25,25 @@ function canReview(m: ManagedAgent): boolean {
 }
 
 function fireReview(m: ManagedAgent): void {
-  const store = useManagedAgentsStore.getState();
-  store.markReviewed(m.leafId);
-  store.setPhase(m.leafId, "reviewing");
   void (async () => {
-    const { getOrCreateChat } = await import("@/modules/ai/store/chatRuntime");
-    const chat = getOrCreateChat(m.sessionId);
-    void chat.sendMessage({
-      role: "user",
-      parts: [{ type: "text", text: buildReviewDirective(m) }],
-    } as Parameters<typeof chat.sendMessage>[0]);
+    const { trySendMessage } = await import("@/modules/ai/store/chatRuntime");
+    const store = useManagedAgentsStore.getState();
+    const current = store.get(m.leafId);
+    if (!current || current.rounds !== m.rounds || !canReview(current)) return;
+    if (useChatStore.getState().activeSessionId !== current.sessionId) {
+      store.setPendingReview(current.leafId, true);
+      return;
+    }
+    const accepted = trySendMessage(current.sessionId, [
+      { type: "text", text: buildReviewDirective(current) },
+    ]);
+    if (!accepted) {
+      store.setPendingReview(current.leafId, true);
+      return;
+    }
+    store.markReviewed(current.leafId);
+    store.setPhase(current.leafId, "reviewing");
+    await accepted;
   })();
 }
 
@@ -51,11 +60,12 @@ export function maybeTriggerManagedReview(leafId: number): void {
 
 export function firePendingReviewForSession(sessionId: string): void {
   const store = useManagedAgentsStore.getState();
-  const m = store.getBySessionId(sessionId);
-  if (!m?.pendingReview) return;
-  if (!canReview(m)) {
-    store.setPendingReview(m.leafId, false);
-    return;
+  for (const m of Object.values(store.agents)) {
+    if (m.sessionId !== sessionId || !m.pendingReview) continue;
+    if (!canReview(m)) {
+      store.setPendingReview(m.leafId, false);
+      continue;
+    }
+    fireReview(m);
   }
-  fireReview(m);
 }

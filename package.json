@@ -1,14 +1,9 @@
 {
   "name": "xuya-terminal",
   "private": true,
-  "version": "1.0.7",
+  "version": "1.0.8",
   "license": "Apache-2.0",
   "description": "XuYa Terminal — AI-native terminal emulator",
-  "homepage": "https://github.com/xuya-dev/XuYa-Terminal",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/xuya-dev/XuYa-Terminal.git"
-  },
   "keywords": [
     "terminal",
     "ai",
@@ -29,6 +24,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "version:set": "node scripts/set-version.mjs",
+    "release:configure": "node scripts/configure-release.mjs",
+    "release:check": "node scripts/check-release.mjs",
+    "test:release": "node --test scripts/release.node-test.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "check-types": "tsc --noEmit",
@@ -139,6 +137,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "babel-plugin-react-compiler": "^1.0.0",
+    "happy-dom": "^21.0.4",
     "knip": "^6.15.0",
     "react-compiler-healthcheck": "^1.0.0",
     "react-scan": "^0.5.7",
@@ -151,5 +150,10 @@
     "vite": "^8.0.16",
     "vite-plugin-inspect": "^11.4.1",
     "vitest": "^4.1.7"
+  },
+  "homepage": "https://github.com/yyds-love/HuiMen-Terminal",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yyds-love/HuiMen-Terminal.git"
   }
 }

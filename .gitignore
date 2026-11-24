@@ -9,6 +9,7 @@ lerna-debug.log*
 
 # Node / Dependency Directories
 node_modules
+.pnpm-store/
 dist
 dist-ssr
 *.local

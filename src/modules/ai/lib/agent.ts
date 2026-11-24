@@ -1,19 +1,19 @@
 import {
   convertToModelMessages,
-  streamText,
   type LanguageModel,
+  streamText,
   type UIMessage,
 } from "ai";
 import {
+  type CustomEndpoint,
   endpointIdFromCompatModel,
   isCompatModelId,
+  type ProviderId,
   providerNeedsKey,
   resolveModel,
-  type CustomEndpoint,
-  type ProviderId,
 } from "../config";
 import { buildTools, type ToolContext } from "../tools/tools";
-import type { ProviderKeys, CustomEndpointKeys } from "./keyring";
+import type { CustomEndpointKeys, ProviderKeys } from "./keyring";
 import { createProxyFetch } from "./proxyFetch";
 
 const localProxyFetch = createProxyFetch({ allowPrivateNetwork: true });
@@ -32,33 +32,38 @@ export async function buildLanguageModel(
   options: BuildModelOptions = {},
   customEndpointKey?: string | null,
 ): Promise<LanguageModel> {
-  if (providerNeedsKey(provider) && !keys[provider]) {
-    throw new Error(
-      `${provider} 未配置 API 密钥。请打开设置 → AI 添加。`,
-    );
+  // An explicit endpoint key (including null) isolates named endpoints from
+  // the legacy compatible provider's credentials.
+  const key =
+    provider === "openai-compatible" && customEndpointKey !== undefined
+      ? (customEndpointKey ?? "")
+      : (keys[provider] ?? "");
+  if (providerNeedsKey(provider) && !key) {
+    throw new Error(`${provider} 未配置 API 密钥。请打开设置 → AI 添加。`);
   }
-  const key = keys[provider] ?? "";
   const compatURL = options.openaiCompatibleBaseURL ?? "";
-  const epKey = customEndpointKey ?? "";
-  const cacheKey = `${provider} ${key} ${epKey} ${resolvedModelId} ${compatURL}`;
+  const cacheKey = JSON.stringify([provider, key, resolvedModelId, compatURL]);
   const hit = modelCache.get(cacheKey);
   if (hit) return hit;
 
   let built: LanguageModel;
   switch (provider) {
     case "deepseek": {
-      const { createOpenAICompatible } =
-        await import("@ai-sdk/openai-compatible");
+      const { createOpenAICompatible } = await import(
+        "@ai-sdk/openai-compatible"
+      );
       built = createOpenAICompatible({
         name: "deepseek",
         baseURL: "https://api.deepseek.com",
         apiKey: key,
+        includeUsage: true,
       })(resolvedModelId);
       break;
     }
     case "zhipu": {
-      const { createOpenAICompatible } =
-        await import("@ai-sdk/openai-compatible");
+      const { createOpenAICompatible } = await import(
+        "@ai-sdk/openai-compatible"
+      );
       built = createOpenAICompatible({
         name: "zhipu",
         baseURL: "https://open.bigmodel.cn/api/paas/v4",
@@ -67,8 +72,9 @@ export async function buildLanguageModel(
       break;
     }
     case "minimax": {
-      const { createOpenAICompatible } =
-        await import("@ai-sdk/openai-compatible");
+      const { createOpenAICompatible } = await import(
+        "@ai-sdk/openai-compatible"
+      );
       built = createOpenAICompatible({
         name: "minimax",
         baseURL: "https://api.minimax.chat/v1",
@@ -77,8 +83,9 @@ export async function buildLanguageModel(
       break;
     }
     case "kimi": {
-      const { createOpenAICompatible } =
-        await import("@ai-sdk/openai-compatible");
+      const { createOpenAICompatible } = await import(
+        "@ai-sdk/openai-compatible"
+      );
       built = createOpenAICompatible({
         name: "kimi",
         baseURL: "https://api.moonshot.cn/v1",
@@ -87,8 +94,9 @@ export async function buildLanguageModel(
       break;
     }
     case "xiaomimimo": {
-      const { createOpenAICompatible } =
-        await import("@ai-sdk/openai-compatible");
+      const { createOpenAICompatible } = await import(
+        "@ai-sdk/openai-compatible"
+      );
       built = createOpenAICompatible({
         name: "xiaomimimo",
         baseURL: "https://api.xiaomimimo.com/v1",
@@ -102,12 +110,13 @@ export async function buildLanguageModel(
           "OpenAI 兼容服务商未设置基础 URL。请在设置 → 模型中设置。",
         );
       }
-      const { createOpenAICompatible } =
-        await import("@ai-sdk/openai-compatible");
+      const { createOpenAICompatible } = await import(
+        "@ai-sdk/openai-compatible"
+      );
       built = createOpenAICompatible({
         name: "openai-compatible",
         baseURL: compatURL,
-        apiKey: epKey || key || undefined,
+        apiKey: key || undefined,
         fetch: localProxyFetch,
       })(resolvedModelId);
       break;
@@ -143,7 +152,7 @@ export function buildConfiguredLanguageModel(
       keys,
       ep.modelId,
       { openaiCompatibleBaseURL: ep.baseURL },
-      local.customEndpointKeys?.[ep.id],
+      local.customEndpointKeys?.[ep.id] ?? null,
     );
   }
   const m = resolveModel(modelId, local.customEndpoints);
@@ -160,7 +169,7 @@ export function buildConfiguredLanguageModel(
     {
       openaiCompatibleBaseURL: local.openaiCompatibleBaseURL,
     },
-    local.customEndpointKeys?.["openai-compatible"],
+    local.customEndpointKeys?.["openai-compatible"] || undefined,
   );
 }
 

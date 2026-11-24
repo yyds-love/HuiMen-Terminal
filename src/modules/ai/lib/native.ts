@@ -1,5 +1,5 @@
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
-import { currentWorkspaceEnv } from "@/modules/workspace";
 
 export type ReadResult =
   | { kind: "text"; content: string; size: number }
@@ -123,6 +123,28 @@ export type GitDiscardEntry = {
   untracked: boolean;
 };
 
+// Keep canonical host identities in guards/caches; translate only IPC inputs.
+// This prevents WSL double translation without merging files across distros.
+function workspacePath(path: string, workspace: WorkspaceEnv): string {
+  if (workspace.kind === "local") return path;
+  const normalized = path
+    .replace(/\\/g, "/")
+    .replace(/^\/\/\?\/UNC\//i, "//")
+    .replace(/^\/\/\?\//, "");
+  const drive = /^([a-z]):\/(.*)$/i.exec(normalized);
+  if (drive) return `/mnt/${drive[1].toLowerCase()}/${drive[2]}`;
+  const unc = /^\/\/(?:wsl\.localhost|wsl\$)\/([^/]+)(\/.*)?$/i.exec(
+    normalized,
+  );
+  if (unc && unc[1].toLowerCase() === workspace.distro.toLowerCase()) {
+    return unc[2] || "/";
+  }
+  if (normalized.startsWith("/") && !normalized.startsWith("//")) {
+    return normalized;
+  }
+  throw new Error("无法将真实路径映射到当前 WSL 工作区。");
+}
+
 export const native = {
   workspaceCurrentDir: () => invoke<string>("workspace_current_dir"),
   workspaceAuthorize: (path: string) =>
@@ -130,61 +152,73 @@ export const native = {
       path,
       workspace: currentWorkspaceEnv(),
     }),
-  readFile: (path: string) =>
+  readFile: async (path: string, workspace = currentWorkspaceEnv()) =>
     invoke<ReadResult>("fs_read_file", {
-      path,
-      workspace: currentWorkspaceEnv(),
+      path: workspacePath(path, workspace),
+      workspace,
     }),
-  writeFile: (path: string, content: string) =>
+  writeFile: async (
+    path: string,
+    content: string,
+    workspace = currentWorkspaceEnv(),
+  ) =>
     invoke<void>("fs_write_file", {
-      path,
+      path: workspacePath(path, workspace),
       content,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  canonicalize: (path: string) =>
+  canonicalize: async (path: string, workspace = currentWorkspaceEnv()) =>
     invoke<string>("fs_canonicalize", {
-      path,
-      workspace: currentWorkspaceEnv(),
+      path: workspacePath(path, workspace),
+      workspace,
     }),
-  createFile: (path: string) =>
-    invoke<void>("fs_create_file", { path, workspace: currentWorkspaceEnv() }),
-  createDir: (path: string) =>
-    invoke<void>("fs_create_dir", { path, workspace: currentWorkspaceEnv() }),
+  createFile: async (path: string, workspace = currentWorkspaceEnv()) =>
+    invoke<void>("fs_create_file", {
+      path: workspacePath(path, workspace),
+      workspace,
+    }),
+  createDir: async (path: string, workspace = currentWorkspaceEnv()) =>
+    invoke<void>("fs_create_dir", {
+      path: workspacePath(path, workspace),
+      workspace,
+    }),
   // AI tooling never sees dot-prefixed entries regardless of the user's
   // explorer preference — keeps .git / .env / .ssh out of agent context.
-  readDir: (path: string) =>
+  readDir: async (path: string, workspace = currentWorkspaceEnv()) =>
     invoke<DirEntry[]>("fs_read_dir", {
-      path,
+      path: workspacePath(path, workspace),
       showHidden: false,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  grep: (params: {
-    pattern: string;
-    root: string;
-    glob?: string[];
-    caseInsensitive?: boolean;
-    maxResults?: number;
-  }) =>
+  grep: async (
+    params: {
+      pattern: string;
+      root: string;
+      glob?: string[];
+      caseInsensitive?: boolean;
+      maxResults?: number;
+    },
+    workspace = currentWorkspaceEnv(),
+  ) =>
     invoke<GrepResponse>("fs_grep", {
       pattern: params.pattern,
-      root: params.root,
+      root: workspacePath(params.root, workspace),
       glob: params.glob ?? null,
       caseInsensitive: params.caseInsensitive ?? null,
       maxResults: params.maxResults ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  glob: (params: { pattern: string; root: string; maxResults?: number }) =>
+  glob: async (
+    params: { pattern: string; root: string; maxResults?: number },
+    workspace = currentWorkspaceEnv(),
+  ) =>
     invoke<GlobResponse>("fs_glob", {
       pattern: params.pattern,
-      root: params.root,
+      root: workspacePath(params.root, workspace),
       maxResults: params.maxResults ?? null,
-      workspace: currentWorkspaceEnv(),
+      workspace,
     }),
-  runCommand: (
-    command: string,
-    cwd?: string | null,
-    timeoutSecs?: number,
-  ) =>
+  runCommand: (command: string, cwd?: string | null, timeoutSecs?: number) =>
     invoke<CommandOutput>("shell_run_command", {
       command,
       cwd: cwd ?? null,
@@ -319,7 +353,10 @@ export const native = {
       repoRoot,
       workspace: currentWorkspaceEnv(),
     }),
-  gitLog: (repoRoot: string, options?: { limit?: number; beforeSha?: string }) =>
+  gitLog: (
+    repoRoot: string,
+    options?: { limit?: number; beforeSha?: string },
+  ) =>
     invoke<GitLogEntry[]>("git_log", {
       repoRoot,
       limit: options?.limit ?? null,

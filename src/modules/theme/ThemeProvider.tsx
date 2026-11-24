@@ -8,11 +8,11 @@ import {
   useRef,
   useState,
 } from "react";
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import { usePreferencesInitialization } from "@/modules/settings/usePreferencesInitialization";
 import {
   DEFAULT_THEME_ID,
   EDITOR_THEMES,
-  loadPreferences,
-  onPreferencesChange,
   setEditorTheme as persistEditorTheme,
   setTheme as persistTheme,
   setThemeId as persistThemeId,
@@ -76,9 +76,15 @@ function resolveTheme(id: string, custom: Theme[]): Theme {
 }
 
 export function ThemeProvider({ children, defaultMode = "system" }: ThemeProviderProps) {
+  usePreferencesInitialization();
+  const hydrated = usePreferencesStore((state) => state.hydrated);
+  const savedMode = usePreferencesStore((state) => state.theme);
+  const savedThemeId = usePreferencesStore((state) => state.themeId);
   const [mode, setModeState] = useState<ThemePref>(() => readFastMode(defaultMode));
   const [themeId, setThemeIdState] = useState<string>(() => readFastThemeId());
   const [previewId, setPreviewId] = useState<string | null>(null);
+  const modeSaveSequence = useRef(0);
+  const themeSaveSequence = useRef(0);
   const [customThemes, setCustomThemes] = useState<Theme[]>([]);
   const [systemDark, setSystemDark] = useState<boolean>(() =>
     typeof window === "undefined"
@@ -87,28 +93,18 @@ export function ThemeProvider({ children, defaultMode = "system" }: ThemeProvide
   );
 
   useEffect(() => {
-    let alive = true;
-    void loadPreferences().then((p) => {
-      if (!alive) return;
-      setModeState(p.theme);
-      setThemeIdState(p.themeId);
-      writeFastMode(p.theme);
-      writeFastThemeId(p.themeId);
-    });
-    const unlistenP = onPreferencesChange((key, value) => {
-      if (key === "theme" && (value === "system" || value === "light" || value === "dark")) {
-        setModeState(value);
-        writeFastMode(value);
-      } else if (key === "themeId" && typeof value === "string") {
-        setThemeIdState(value);
-        writeFastThemeId(value);
-      }
-    });
-    return () => {
-      alive = false;
-      void unlistenP.then((fn) => fn());
-    };
-  }, []);
+    if (!hydrated) return;
+    if (savedMode === "system" || savedMode === "light" || savedMode === "dark") {
+      setModeState(savedMode);
+      writeFastMode(savedMode);
+    }
+  }, [hydrated, savedMode]);
+
+  useEffect(() => {
+    if (!hydrated || typeof savedThemeId !== "string") return;
+    setThemeIdState(savedThemeId);
+    writeFastThemeId(savedThemeId);
+  }, [hydrated, savedThemeId]);
 
   useEffect(() => {
     let alive = true;
@@ -160,18 +156,40 @@ export function ThemeProvider({ children, defaultMode = "system" }: ThemeProvide
     }
   }, [effectiveId, previewId, resolvedMode, customThemes]);
 
-  const setMode = useCallback((next: ThemePref) => {
-    setModeState(next);
-    writeFastMode(next);
-    void persistTheme(next);
-  }, []);
+  const setMode = useCallback(
+    (next: ThemePref) => {
+      const sequence = ++modeSaveSequence.current;
+      setModeState(next);
+      writeFastMode(next);
+      void persistTheme(next).catch(() => {
+        console.error("Failed to save the theme mode preference.");
+        if (sequence !== modeSaveSequence.current) return;
+        const prefs = usePreferencesStore.getState();
+        const restored = prefs.hydrated ? prefs.theme : mode;
+        setModeState(restored);
+        writeFastMode(restored);
+      });
+    },
+    [mode],
+  );
 
-  const setThemeId = useCallback((id: string) => {
-    setPreviewId(null);
-    setThemeIdState(id);
-    writeFastThemeId(id);
-    void persistThemeId(id);
-  }, []);
+  const setThemeId = useCallback(
+    (id: string) => {
+      const sequence = ++themeSaveSequence.current;
+      setPreviewId(null);
+      setThemeIdState(id);
+      writeFastThemeId(id);
+      void persistThemeId(id).catch(() => {
+        console.error("Failed to save the theme selection preference.");
+        if (sequence !== themeSaveSequence.current) return;
+        const prefs = usePreferencesStore.getState();
+        const restored = prefs.hydrated ? prefs.themeId : themeId;
+        setThemeIdState(restored);
+        writeFastThemeId(restored);
+      });
+    },
+    [themeId],
+  );
 
   const previewThemeId = useCallback((id: string | null) => {
     setPreviewId(id);

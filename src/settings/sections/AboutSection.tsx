@@ -1,15 +1,13 @@
 import { Button } from "@/components/ui/button";
 import { useUpdater } from "@/modules/updater";
-import { GithubIcon, Globe02Icon } from "@hugeicons/core-free-icons";
+import { getReleaseRepository } from "@/modules/updater/releaseConfig";
+import { GithubIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getName, getVersion } from "@tauri-apps/api/app";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { arch, platform } from "@tauri-apps/plugin-os";
 import { useEffect, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
-
-const REPO_URL = "https://github.com/xuya-dev/XuYa-Terminal";
-const WEBSITE = "https://github.com/xuya-dev/XuYa-Terminal";
 
 const PLATFORM_LABEL: Record<string, string> = {
   macos: "macOS",
@@ -24,36 +22,60 @@ export function AboutSection() {
   const [version, setVersion] = useState("");
   const [name, setName] = useState("XuYa Terminal");
   const [build, setBuild] = useState("");
+  const [linkError, setLinkError] = useState("");
+  const repository = getReleaseRepository();
+  const repoUrl = repository ? `https://github.com/${repository}` : null;
   const { status, check, install } = useUpdater({ autoCheck: false });
   const checking = status.kind === "checking";
   const downloading = status.kind === "downloading";
+  const installing = status.kind === "installing";
   const available = status.kind === "available";
   const manualAvailable = status.kind === "manual-available";
   const ready = status.kind === "ready";
-  const checkLabel =
-    status.kind === "uptodate"
+  const checkLabel = !repository
+    ? "尚未配置更新"
+    : status.kind === "uptodate"
       ? "已是最新版本"
       : status.kind === "error"
-        ? "检查失败 -- 重试"
+        ? status.retryInstall
+          ? "重试安装"
+          : "检查失败 -- 重试"
         : checking
           ? "检查中..."
           : downloading
             ? "下载中..."
-            : ready
-              ? "重启以安装"
-              : available
-                ? `安装 v${status.update.version}`
-                : manualAvailable
-                  ? `更新至 v${status.info.version}`
-                  : "检查更新";
+            : installing
+              ? "正在安装..."
+              : ready
+                ? "立即重启"
+                : available
+                  ? `安装 v${status.update.version}`
+                  : manualAvailable
+                    ? `更新至 v${status.info.version}`
+                    : "检查更新";
+  const visit = async (url: string) => {
+    setLinkError("");
+    try {
+      await openUrl(url);
+    } catch (error) {
+      setLinkError(String(error));
+    }
+  };
   const onUpdateClick = () => {
-    if (available) void install();
+    if (available || ready || (status.kind === "error" && status.retryInstall))
+      void install();
+    else if (status.kind === "manual-available")
+      void visit(status.info.releaseUrl);
     else void check({ manual: true });
   };
 
   useEffect(() => {
-    void getVersion().then(setVersion);
-    void getName().then(setName);
+    void getVersion()
+      .then(setVersion)
+      .catch(() => setVersion(""));
+    void getName()
+      .then(setName)
+      .catch(() => setName("XuYa Terminal"));
     try {
       const p = platform();
       const a = arch();
@@ -95,28 +117,21 @@ export function AboutSection() {
         <dt className="text-muted-foreground">许可证</dt>
         <dd>Apache 2.0</dd>
 
-        <dt className="text-muted-foreground">源代码</dt>
-        <dd>
-          <button
-            type="button"
-            onClick={() => void openUrl(REPO_URL)}
-            className="inline-flex items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:text-foreground hover:underline"
-          >
-            <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
-            xuya-dev/XuYa-Terminal
-          </button>
-        </dd>
-        <dt className="text-muted-foreground">官网</dt>
-        <dd>
-          <button
-            type="button"
-            onClick={() => void openUrl(WEBSITE)}
-            className="inline-flex items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:text-foreground hover:underline"
-          >
-            <HugeiconsIcon icon={Globe02Icon} size={12} strokeWidth={1.75} />
-            github.com/xuya-dev
-          </button>
-        </dd>
+        {repoUrl && (
+          <>
+            <dt className="text-muted-foreground">源代码</dt>
+            <dd>
+              <button
+                type="button"
+                onClick={() => void visit(repoUrl)}
+                className="inline-flex items-center gap-1.5 rounded-md text-[12px] underline-offset-2 hover:text-foreground hover:underline"
+              >
+                <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
+                {repository}
+              </button>
+            </dd>
+          </>
+        )}
       </dl>
 
       <div className="flex flex-col gap-1.5">
@@ -124,27 +139,41 @@ export function AboutSection() {
           <Button
             size="sm"
             onClick={onUpdateClick}
-            disabled={checking || downloading || ready}
+            disabled={!repository || checking || downloading || installing}
           >
             {checkLabel}
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void openUrl(REPO_URL)}
-            className="gap-1.5"
-          >
-            <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
-            在 GitHub 上查看
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void openUrl(`${REPO_URL}/issues/new`)}
-          >
-            报告问题
-          </Button>
+          {repoUrl && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void visit(repoUrl)}
+                className="gap-1.5"
+              >
+                <HugeiconsIcon icon={GithubIcon} size={12} strokeWidth={1.75} />
+                在 GitHub 上查看
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void visit(`${repoUrl}/issues/new`)}
+              >
+                报告问题
+              </Button>
+            </>
+          )}
         </div>
+        {available && (
+          <p className="text-[11px] text-muted-foreground">
+            安装会关闭终端会话并重启应用，请先保存文件并结束运行中的任务。
+          </p>
+        )}
+        {((status.kind === "ready" && status.message) || linkError) && (
+          <p role="alert" className="break-all text-xs text-destructive">
+            {linkError || (status.kind === "ready" ? status.message : "")}
+          </p>
+        )}
         {status.kind === "error" && (
           <p className="font-mono text-[10.5px] break-all text-destructive/80">
             {status.message}

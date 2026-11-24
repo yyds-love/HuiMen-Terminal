@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Suspense, lazy, useState } from "react";
+import { lazy, Suspense, useState } from "react";
 
 // Lazy-loaded so streamdown (a heavy markdown renderer) stays out of the
 // startup eager bundle (see src/app/eager-budget.test.ts). Only pays the cost
@@ -17,26 +17,8 @@ import { Suspense, lazy, useState } from "react";
 const Streamdown = lazy(() =>
   import("streamdown").then((m) => ({ default: m.Streamdown })),
 );
+
 import { useUpdater } from "./useUpdater";
-
-type DistroKey = "arch" | "debian" | "fedora";
-
-function distroCommand(key: DistroKey, version: string): string {
-  switch (key) {
-    case "arch":
-      return "yay -S xuya-terminal-bin";
-    case "debian":
-      return `sudo apt install ./XuYa-Terminal_${version}_amd64.deb`;
-    case "fedora":
-      return `sudo dnf install ./XuYa-Terminal-${version}-1.x86_64.rpm`;
-  }
-}
-
-const DISTROS: { key: DistroKey; label: string }[] = [
-  { key: "arch", label: "Arch" },
-  { key: "debian", label: "Debian / Ubuntu" },
-  { key: "fedora", label: "Fedora / RHEL" },
-];
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -46,39 +28,36 @@ function formatBytes(n: number): string {
 
 export function UpdaterDialog() {
   const { status, install, dismiss } = useUpdater();
-  const [copied, setCopied] = useState(false);
-  const [distro, setDistro] = useState<DistroKey>("arch");
-  const manualVersion =
-    status.kind === "manual-available" ? status.info.version : "";
-  const activeCommand = distroCommand(distro, manualVersion);
-
+  const [linkError, setLinkError] = useState("");
+  const installError = status.kind === "error" && status.retryInstall;
   const open =
     status.kind === "available" ||
     status.kind === "manual-available" ||
     status.kind === "downloading" ||
-    status.kind === "ready";
+    status.kind === "installing" ||
+    status.kind === "ready" ||
+    !!installError;
 
   if (!open) return null;
 
   const update = status.kind === "available" ? status.update : null;
   const manual = status.kind === "manual-available" ? status.info : null;
   const downloading = status.kind === "downloading";
+  const installing = status.kind === "installing";
   const ready = status.kind === "ready";
-
-  const copyCommand = async () => {
-    if (!navigator?.clipboard?.writeText) return;
-    try {
-      await navigator.clipboard.writeText(activeCommand);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // ignore
-    }
-  };
   const progress =
     downloading && status.contentLength
       ? Math.min(100, (status.downloaded / status.contentLength) * 100)
       : null;
+
+  const visitRelease = async (url: string) => {
+    setLinkError("");
+    try {
+      await openUrl(url);
+    } catch (error) {
+      setLinkError(String(error));
+    }
+  };
 
   return (
     <Dialog
@@ -86,7 +65,9 @@ export function UpdaterDialog() {
       onOpenChange={(o) => {
         if (
           !o &&
-          (status.kind === "available" || status.kind === "manual-available")
+          (status.kind === "available" ||
+            status.kind === "manual-available" ||
+            installError)
         )
           dismiss();
       }}
@@ -94,24 +75,32 @@ export function UpdaterDialog() {
       <DialogContent className="sm:max-w-[440px]">
         <DialogHeader>
           <DialogTitle>
-            {ready
-              ? "更新就绪"
-              : downloading
-                ? "下载更新中..."
-                : manual
-                  ? `XuYa Terminal v${manual.version} 可用`
-                  : `XuYa Terminal v${update?.version} 可用`}
+            {installError
+              ? "更新安装失败"
+              : installing
+                ? "正在安装更新..."
+                : ready
+                  ? "更新就绪"
+                  : downloading
+                    ? "下载更新中..."
+                    : manual
+                      ? `XuYa Terminal v${manual.version} 可用`
+                      : `XuYa Terminal v${update?.version} 可用`}
           </DialogTitle>
           <DialogDescription>
-            {ready
-              ? "重启 XuYa Terminal 以完成安装。"
-              : downloading
-                ? progress !== null
-                  ? `${progress.toFixed(0)}% — ${formatBytes(status.downloaded)}`
-                  : formatBytes(status.downloaded)
-                : manual
-                  ? `当前版本 v${manual.currentVersion}。选择你的发行版并运行命令，或从 GitHub 获取安装包。`
-                  : "发现新版本，以下是本次更新内容。"}
+            {installError
+              ? "更新未完成，请检查网络和错误信息后重试。"
+              : installing
+                ? "下载完成，正在验证并安装更新，请稍候。"
+                : ready
+                  ? "安装已完成。若未自动重启，请点击立即重启。"
+                  : downloading
+                    ? progress !== null
+                      ? `${progress.toFixed(0)}% — ${formatBytes(status.downloaded)}`
+                      : formatBytes(status.downloaded)
+                    : manual
+                      ? `当前版本 v${manual.currentVersion}。请下载适合你的发行版和架构的安装包，退出应用后手动安装。`
+                      : "安装会关闭终端会话并重启应用，请先保存文件并结束运行中的任务。"}
           </DialogDescription>
         </DialogHeader>
 
@@ -119,15 +108,18 @@ export function UpdaterDialog() {
             body). Render via Streamdown in a scrollable region so a long
             changelog can't blow up the dialog. Hidden while downloading/ready
             where only progress matters. */}
-        {!ready && !downloading && (update?.body || manual?.body) && (
-          <div className="max-h-[260px] overflow-auto rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-[13px]">
-            <Suspense fallback={(update?.body ?? manual?.body) as string}>
-              <Streamdown className="select-text prose-sm [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                {(update?.body ?? manual?.body) as string}
-              </Streamdown>
-            </Suspense>
-          </div>
-        )}
+        {!ready &&
+          !downloading &&
+          !installing &&
+          (update?.body || manual?.body) && (
+            <div className="max-h-[260px] overflow-auto rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-[13px]">
+              <Suspense fallback={(update?.body ?? manual?.body) as string}>
+                <Streamdown className="select-text prose-sm [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                  {(update?.body ?? manual?.body) as string}
+                </Streamdown>
+              </Suspense>
+            </div>
+          )}
 
         {downloading && progress !== null && (
           <Progress value={progress} className="mt-2" />
@@ -136,39 +128,35 @@ export function UpdaterDialog() {
           <Progress value={undefined} className="mt-2 animate-pulse" />
         )}
 
-        {manual && (
-          <div className="mt-2 flex flex-col gap-2">
-            <div className="flex gap-1 rounded-md bg-muted/40 p-1">
-              {DISTROS.map((d) => (
-                <button
-                  key={d.key}
-                  type="button"
-                  onClick={() => setDistro(d.key)}
-                  className={`flex-1 rounded px-2 py-1 text-[11px] transition-colors ${
-                    distro === d.key
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {d.label}
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/40 px-3 py-2 font-mono text-[12px]">
-              <span className="flex-1 select-all">$ {activeCommand}</span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-[11px]"
-                onClick={() => void copyCommand()}
-              >
-                {copied ? "已复制" : "复制"}
-              </Button>
-            </div>
-          </div>
+        {(status.kind === "error" || status.kind === "ready") &&
+          status.message && (
+            <p role="alert" className="break-all text-xs text-destructive">
+              {status.message}
+            </p>
+          )}
+
+        {manual && linkError && (
+          <p role="alert" className="break-all text-xs text-destructive">
+            {linkError}
+          </p>
         )}
 
         <DialogFooter>
+          {installError && (
+            <>
+              <Button variant="ghost" size="sm" onClick={dismiss}>
+                稍后
+              </Button>
+              <Button size="sm" onClick={() => void install()}>
+                重试安装
+              </Button>
+            </>
+          )}
+          {ready && (
+            <Button size="sm" onClick={() => void install()}>
+              立即重启
+            </Button>
+          )}
           {status.kind === "available" && (
             <>
               <Button variant="ghost" size="sm" onClick={dismiss}>
@@ -186,7 +174,7 @@ export function UpdaterDialog() {
               </Button>
               <Button
                 size="sm"
-                onClick={() => void openUrl(manual.releaseUrl)}
+                onClick={() => void visitRelease(manual.releaseUrl)}
               >
                 下载安装包
               </Button>

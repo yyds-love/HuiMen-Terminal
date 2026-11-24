@@ -3,11 +3,11 @@
 > 面向 AI Agent 工作流的原生终端工作台。
 > 基于 Tauri v2、React 19、TypeScript 与 Rust 构建，重点优化 Windows PTY、中文界面、AI 编程会话和代理商配置体验。
 
-当前版本：`1.0.7`
+当前版本：`1.0.8`
 
 ## 项目状态
 
-XuYa Terminal 正在活跃开发中，当前面向 Windows、macOS 和 Linux 桌面环境与 AI 编程工作流。项目已接入 GitHub Releases 自动更新，欢迎提交 Issue、功能建议、文档改进和 Pull Request。
+XuYa Terminal 正在活跃开发中，当前面向 Windows、macOS 和 Linux 桌面环境与 AI 编程工作流。项目支持 GitHub Releases 签名更新；首次分发前需要配置自己的发布仓库和公钥，见 [自动更新与发布](docs/auto-update.md)。
 
 ## 核心特性
 
@@ -27,13 +27,9 @@ XuYa Terminal 正在活跃开发中，当前面向 Windows、macOS 和 Linux 桌
 
 ## 安装
 
-前往 GitHub Releases 下载最新安装包：
+发布后，从你配置的 GitHub 仓库的 Releases 页面下载安装包。当前尚未配置发布渠道。
 
-```text
-https://github.com/xuya-dev/XuYa-Terminal/releases/latest
-```
-
-当前发布流程会生成 Windows、macOS 和 Linux 安装包，并生成 updater 所需的 `latest.json`。已安装客户端可在“关于”页面检查更新。
+发布流程会生成 Windows、macOS 和 Linux 安装包，以及 updater 所需的 `latest.json`。已配置的 Windows/macOS 客户端可在“关于”页面检查并安装更新；Linux 使用手动下载安装。朋友运行安装包不需要安装 Rust 或前端开发工具。
 
 ## 本地开发要求
 
@@ -41,7 +37,7 @@ https://github.com/xuya-dev/XuYa-Terminal/releases/latest
 
 - Windows 10 / Windows 11
 - Node.js 22+
-- pnpm 10+
+- `package.json` 中固定版本的 pnpm
 - Rust stable toolchain
 - Tauri v2 开发环境
 
@@ -56,7 +52,7 @@ https://github.com/xuya-dev/XuYa-Terminal/releases/latest
 克隆仓库：
 
 ```bash
-git clone https://github.com/xuya-dev/XuYa-Terminal.git
+git clone <你的仓库地址>
 cd XuYa-Terminal
 ```
 
@@ -262,7 +258,7 @@ cargo fmt
 版本号通过脚本统一更新：
 
 ```bash
-pnpm run version:set -- 1.0.7
+pnpm run version:set -- 1.0.8
 ```
 
 该命令会同步更新：
@@ -279,8 +275,8 @@ pnpm run version:set -- 1.0.7
 版本标签使用 `v*` 格式，例如：
 
 ```bash
-git tag v1.0.7
-git push origin v1.0.7
+git tag v1.0.8
+git push origin v1.0.8
 ```
 
 推送 `v*` 标签会触发 GitHub Actions 发布流程，自动构建 Windows、macOS 和 Linux 安装包并生成 updater 所需的发布文件。更多细节见 [docs/auto-update.md](docs/auto-update.md)。

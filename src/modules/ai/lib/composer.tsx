@@ -1,17 +1,12 @@
+import { currentWorkspaceEnv } from "@/modules/workspace";
 import { invoke } from "@tauri-apps/api/core";
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { useWhisperRecording } from "../hooks/useWhisperRecording";
 import { expandSnippetTokens, type Snippet } from "../lib/snippets";
-import { tryRunSlashCommand, type SlashCommandMeta } from "./slashCommands";
 import { getChat, useChatStore } from "../store/chatStore";
 import { useSnippetsStore } from "../store/snippetsStore";
-import { currentWorkspaceEnv } from "@/modules/workspace";
+import { hasPendingToolApprovals } from "./approval";
+import { type SlashCommandMeta, tryRunSlashCommand } from "./slashCommands";
 
 export type FileAttachment = {
   id: string;
@@ -74,12 +69,14 @@ export function AiComposerProvider({ children }: ProviderProps) {
   const sessionId = useChatStore((s) => s.activeSessionId);
   const status = useChatStore((s) => s.agentMeta.status);
   const isBusy = status === "thinking" || status === "streaming";
+  const awaitingApproval = status === "awaiting-approval";
 
   const [value, setValue] = useState("");
   const [files, setFiles] = useState<FileAttachment[]>([]);
   const [pickedSnippets, setPickedSnippets] = useState<Snippet[]>([]);
   const [pickedCommands, setPickedCommands] = useState<SlashCommandMeta[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const submittingRef = useRef(false);
 
   const focusSignal = useChatStore((s) => s.focusSignal);
   const pendingPrefill = useChatStore((s) => s.pendingPrefill);
@@ -130,10 +127,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
         if (existing.has(sel.id)) continue;
         next.push({
           id: sel.id,
-          name:
-            sel.source === "editor"
-              ? "编辑器选区"
-              : "终端选区",
+          name: sel.source === "editor" ? "编辑器选区" : "终端选区",
           kind: "selection",
           mediaType: "text/plain",
           text: sel.text,
@@ -216,7 +210,10 @@ export function AiComposerProvider({ children }: ProviderProps) {
   };
 
   const submit = () => {
-    if (isBusy) return;
+    if (isBusy || awaitingApproval || submittingRef.current) return;
+    const chat = sessionId ? getChat(sessionId) : undefined;
+    // Check the actual messages too: the lifecycle bridge updates after render.
+    if (chat && hasPendingToolApprovals(chat.messages)) return;
     const trimmed = value.trim();
     if (
       !trimmed &&
@@ -231,7 +228,11 @@ export function AiComposerProvider({ children }: ProviderProps) {
     let effectiveText = trimmed;
     let commandMarker: string | null = null;
     let commandSource = trimmed;
-    if (pickedCommands.length > 0 && !trimmed.startsWith("/") && !trimmed.startsWith("#")) {
+    if (
+      pickedCommands.length > 0 &&
+      !trimmed.startsWith("/") &&
+      !trimmed.startsWith("#")
+    ) {
       commandSource = `#${pickedCommands[0].name} ${trimmed}`.trim();
     }
     if (commandSource.startsWith("/") || commandSource.startsWith("#")) {
@@ -262,10 +263,8 @@ export function AiComposerProvider({ children }: ProviderProps) {
         (f) =>
           `<selection source="${f.source ?? "terminal"}">\n${f.text ?? ""}\n</selection>`,
       );
-    const { body: bodyAfterTokens, blocks: snippetBlocks } = expandSnippetTokens(
-      effectiveText,
-      useSnippetsStore.getState().snippets,
-    );
+    const { body: bodyAfterTokens, blocks: snippetBlocks } =
+      expandSnippetTokens(effectiveText, useSnippetsStore.getState().snippets);
     const seenHandles = new Set<string>();
     const allSnippetBlocks: string[] = [];
     for (const s of pickedSnippets) {
@@ -304,22 +303,37 @@ export function AiComposerProvider({ children }: ProviderProps) {
     }
 
     if (!sessionId) return;
-    const store = useChatStore.getState();
-    store.patchAgentMeta({ hitStepCap: false, compactionNotice: null });
-    if (!store.mini.open) store.openMini();
+    submittingRef.current = true;
     void (async () => {
-      const { getOrCreateChat } = await import("../store/chatRuntime");
-      const chat = getOrCreateChat(sessionId);
-      void chat.sendMessage({ role: "user", parts } as Parameters<
-        typeof chat.sendMessage
-      >[0]);
+      try {
+        const { trySendMessage } = await import("../store/chatRuntime");
+        const store = useChatStore.getState();
+        if (store.activeSessionId !== sessionId) return;
+        const pending = trySendMessage(sessionId, parts);
+        if (!pending) return;
+        store.patchAgentMeta({ hitStepCap: false, compactionNotice: null });
+        if (!store.mini.open) store.openMini();
+        void pending;
+        setValue((draft) => (draft === value ? "" : draft));
+        setFiles((draft) =>
+          draft.filter((file) => !files.some((sent) => sent.id === file.id)),
+        );
+        setPickedSnippets((draft) =>
+          draft.filter(
+            (snippet) => !pickedSnippets.some((sent) => sent.id === snippet.id),
+          ),
+        );
+        setPickedCommands((draft) =>
+          draft.filter(
+            (command) =>
+              !pickedCommands.some((sent) => sent.name === command.name),
+          ),
+        );
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      } finally {
+        submittingRef.current = false;
+      }
     })();
-    setValue("");
-    setFiles([]);
-    setPickedSnippets([]);
-    setPickedCommands([]);
-    // Re-focus immediately after submit so the user can type a follow-up
-    requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
   const stop = () => {
@@ -329,6 +343,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
 
   const canSend =
     !isBusy &&
+    !awaitingApproval &&
     (value.trim().length > 0 ||
       files.length > 0 ||
       pickedSnippets.length > 0 ||

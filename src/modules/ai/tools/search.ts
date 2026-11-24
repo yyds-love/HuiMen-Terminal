@@ -1,3 +1,4 @@
+import { currentWorkspaceEnv, type WorkspaceEnv } from "@/modules/workspace";
 import { tool } from "ai";
 import { z } from "zod";
 import { native } from "../lib/native";
@@ -32,6 +33,27 @@ function clipLine(s: string): string {
   return `${s.slice(0, MAX_LINE_LEN)}…[+${s.length - MAX_LINE_LEN}]`;
 }
 
+/** Only release validated files to AI; share checks for repeated matching lines. */
+async function readableHits<T extends { path: string }>(
+  hits: T[],
+  workspace: WorkspaceEnv,
+): Promise<T[]> {
+  const checks = new Map<string, Promise<boolean>>();
+  const allowed = await Promise.all(
+    hits.map((hit) => {
+      let check = checks.get(hit.path);
+      if (!check) {
+        check = checkReadableCanonical(hit.path, (path) =>
+          native.canonicalize(path, workspace),
+        ).then((result) => result.ok);
+        checks.set(hit.path, check);
+      }
+      return check;
+    }),
+  );
+  return hits.filter((_, index) => allowed[index]);
+}
+
 export function buildSearchTools(ctx: ToolContext) {
   return {
     grep: tool({
@@ -46,15 +68,11 @@ export function buildSearchTools(ctx: ToolContext) {
         root: z
           .string()
           .optional()
-          .describe(
-            "搜索根目录。默认为工作区根目录，然后是活动工作目录。",
-          ),
+          .describe("搜索根目录。默认为工作区根目录，然后是活动工作目录。"),
         glob: z
           .array(z.string())
           .optional()
-          .describe(
-            "可选的路径包含 glob，例如 ['**/*.ts', 'src/**/*.tsx']。",
-          ),
+          .describe("可选的路径包含 glob，例如 ['**/*.ts', 'src/**/*.tsx']。"),
         case_insensitive: z.boolean().optional(),
         max_results: z.number().int().min(1).max(500).optional(),
       }),
@@ -65,23 +83,30 @@ export function buildSearchTools(ctx: ToolContext) {
         case_insensitive,
         max_results,
       }) => {
+        const workspace = currentWorkspaceEnv();
         const r = resolveRoot(root, ctx);
         if (!r.ok) return { error: r.error };
-        const safety = await checkReadableCanonical(r.path, native.canonicalize);
+        const safety = await checkReadableCanonical(r.path, (path) =>
+          native.canonicalize(path, workspace),
+        );
         if (!safety.ok) return { error: safety.reason, root: r.path };
         r.path = safety.canonical;
         const cap = Math.min(max_results ?? 30, 500);
         try {
-          const res = await native.grep({
-            pattern,
-            root: r.path,
-            glob,
-            caseInsensitive: case_insensitive,
-            maxResults: cap,
-          });
+          const res = await native.grep(
+            {
+              pattern,
+              root: r.path,
+              glob,
+              caseInsensitive: case_insensitive,
+              maxResults: cap,
+            },
+            workspace,
+          );
+          const hits = await readableHits(res.hits, workspace);
           return {
             root: r.path,
-            hits: res.hits.map((h) => ({
+            hits: hits.map((h) => ({
               path: h.path,
               rel: h.rel,
               line: h.line,
@@ -105,20 +130,26 @@ export function buildSearchTools(ctx: ToolContext) {
         max_results: z.number().int().min(1).max(2000).optional(),
       }),
       execute: async ({ pattern, root, max_results }) => {
+        const workspace = currentWorkspaceEnv();
         const r = resolveRoot(root, ctx);
         if (!r.ok) return { error: r.error };
-        const safety = await checkReadableCanonical(r.path, native.canonicalize);
+        const safety = await checkReadableCanonical(r.path, (path) =>
+          native.canonicalize(path, workspace),
+        );
         if (!safety.ok) return { error: safety.reason, root: r.path };
         r.path = safety.canonical;
         try {
-          const res = await native.glob({
-            pattern,
-            root: r.path,
-            maxResults: max_results,
-          });
+          const res = await native.glob(
+            {
+              pattern,
+              root: r.path,
+              maxResults: max_results,
+            },
+            workspace,
+          );
           return {
             root: r.path,
-            hits: res.hits,
+            hits: await readableHits(res.hits, workspace),
             truncated: res.truncated,
           };
         } catch (e) {

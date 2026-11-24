@@ -1,15 +1,17 @@
-import { useChat, type UIMessage } from "@ai-sdk/react";
+import { firePendingReviewForSession } from "@/modules/agents/lib/review";
+import { type UIMessage, useChat } from "@ai-sdk/react";
 import type { ToolUIPart, UIMessagePart } from "ai";
 import { useEffect, useMemo, useRef } from "react";
+import { hasPendingToolApprovals } from "../lib/approval";
 import { native } from "../lib/native";
 import { checkReadable } from "../lib/security";
-import { resolvePath } from "../tools/tools";
+import { getOrCreateChat } from "../store/chatRuntime";
 import {
+  type AgentRunStatus,
   flushPersist,
   useChatStore,
-  type AgentRunStatus,
 } from "../store/chatStore";
-import { getOrCreateChat } from "../store/chatRuntime";
+import { resolvePath } from "../tools/tools";
 
 /**
  * Headless bridge that mirrors chat lifecycle into the store, so the status
@@ -54,11 +56,7 @@ type ToolPartLike = ToolUIPart & {
 
 type AnyPart = UIMessagePart<Record<string, never>, Record<string, never>>;
 
-function Bridge({
-  sessionId,
-  openAiDiffTab,
-  closeAiDiffTab,
-}: BridgeProps) {
+function Bridge({ sessionId, openAiDiffTab, closeAiDiffTab }: BridgeProps) {
   const chat = useMemo(() => getOrCreateChat(sessionId), [sessionId]);
   const { status, messages, addToolApprovalResponse } = useChat<UIMessage>({
     chat,
@@ -92,6 +90,15 @@ function Bridge({
     return () => flushPersist(sessionId);
   }, [sessionId]);
 
+  useEffect(() => {
+    if (
+      (status === "ready" || status === "error") &&
+      !hasPendingToolApprovals(messages)
+    ) {
+      firePendingReviewForSession(sessionId);
+    }
+  }, [sessionId, status, messages]);
+
   const approvalsPending = useMemo(() => {
     let n = 0;
     for (const m of messages) {
@@ -113,9 +120,7 @@ function Bridge({
     patch({
       status: runStatus,
       approvalsPending,
-      ...(runStatus === "idle" || runStatus === "error"
-        ? { step: null }
-        : {}),
+      ...(runStatus === "idle" || runStatus === "error" ? { step: null } : {}),
       ...(runStatus === "idle" ? { error: null } : {}),
     });
   }, [status, approvalsPending, patch]);
@@ -149,8 +154,7 @@ function Bridge({
           t === "tool-multi_edit"
         ) {
           const state = (p as { state?: string }).state ?? "";
-          const id =
-            (p as { approval?: { id?: string } }).approval?.id ?? "";
+          const id = (p as { approval?: { id?: string } }).approval?.id ?? "";
           fp += `${id}:${state}|`;
         }
       }
