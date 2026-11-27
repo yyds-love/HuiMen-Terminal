@@ -4,6 +4,7 @@ import {
   type TerminalAppearance,
 } from "@/styles/terminalTheme";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { WindowsConsoleKey } from "./keymap";
 
 const textEncoder = new TextEncoder();
 
@@ -14,7 +15,7 @@ export type PtyHandlers = {
 
 export type PtySession = {
   id: number;
-  write: (data: string) => Promise<void>;
+  write: (data: string, consoleKey?: WindowsConsoleKey) => Promise<void>;
   resize: (cols: number, rows: number) => Promise<void>;
   setAppearance: (appearance?: TerminalAppearance) => Promise<void>;
   close: () => Promise<void>;
@@ -64,7 +65,12 @@ export async function openPty(
   return {
     id,
     // Raw bytes + id header: no JSON round-trip on the per-keystroke path.
-    write: (data) => invoke("pty_write", textEncoder.encode(data), { headers }),
+    write: (data, consoleKey) =>
+      invoke("pty_write", textEncoder.encode(data), {
+        headers: consoleKey
+          ? { ...headers, "x-pty-console-key": consoleKey }
+          : headers,
+      }),
     resize: (c, r) => invoke("pty_resize", { id, cols: c, rows: r }),
     setAppearance: (next = currentTerminalAppearance()) =>
       invoke("pty_set_appearance", { id, appearance: next }),

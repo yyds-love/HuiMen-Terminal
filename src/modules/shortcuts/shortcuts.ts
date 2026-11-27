@@ -65,15 +65,38 @@ export type Shortcut = {
   label: string;
   group: ShortcutGroup;
   defaultBindings: KeyBinding[];
+  terminalAlternative?: KeyBinding;
   allowRepeat?: boolean;
 };
+
+function withTerminalAlternative(key: string, shiftedKey = key) {
+  return {
+    defaultBindings: [{ [MOD_PROP]: true, key }],
+    terminalAlternative: IS_MAC ? undefined : ctrlShiftBinding(shiftedKey),
+  };
+}
+
+function ctrlShiftBinding(key: string): KeyBinding {
+  return { ctrl: true, shift: true, key };
+}
+
+export function getShortcutBindings(
+  shortcut: Shortcut,
+  userBindings: KeyBinding[] | undefined,
+): KeyBinding[] {
+  if (userBindings) return userBindings;
+  const { defaultBindings, terminalAlternative } = shortcut;
+  return terminalAlternative
+    ? [terminalAlternative, ...defaultBindings]
+    : defaultBindings;
+}
 
 export const SHORTCUTS: Shortcut[] = [
   {
     id: "commandPalette.open",
     label: "打开命令面板",
     group: "通用",
-    defaultBindings: [{ [MOD_PROP]: true, key: "p" }],
+    ...withTerminalAlternative("p", "k"),
   },
   {
     id: "commandPalette.content",
@@ -97,7 +120,7 @@ export const SHORTCUTS: Shortcut[] = [
     id: "tab.newPrivate",
     label: "新建隐私终端",
     group: "选项卡",
-    defaultBindings: [{ [MOD_PROP]: true, key: "r" }],
+    ...withTerminalAlternative("r", "n"),
   },
   {
     id: "tab.newPreview",
@@ -116,7 +139,7 @@ export const SHORTCUTS: Shortcut[] = [
     id: "tab.close",
     label: "关闭选项卡或窗格",
     group: "选项卡",
-    defaultBindings: [{ [MOD_PROP]: true, key: "w" }],
+    ...withTerminalAlternative("w"),
   },
   {
     id: "pane.splitRight",
@@ -134,14 +157,14 @@ export const SHORTCUTS: Shortcut[] = [
     id: "pane.focusNext",
     label: "聚焦下一个窗格",
     group: "窗格",
-    defaultBindings: [{ [MOD_PROP]: true, key: "]" }],
+    ...withTerminalAlternative("]", "g"),
   },
   {
     id: "pane.focusPrev",
     label: "聚焦上一个窗格",
     group: "窗格",
-    defaultBindings: [{ [MOD_PROP]: true, key: "[" }],
-  },  
+    ...withTerminalAlternative("[", "h"),
+  },
   {
     id: "pane.source",
     label: "切换源面板",
@@ -188,12 +211,14 @@ export const SHORTCUTS: Shortcut[] = [
     label: "下一个选项卡",
     group: "选项卡",
     defaultBindings: [{ ctrl: true, key: "Tab" }],
+    terminalAlternative: ctrlShiftBinding("PageDown"),
   },
   {
     id: "tab.prev",
     label: "上一个选项卡",
     group: "选项卡",
     defaultBindings: [{ ctrl: true, shift: true, key: "Tab" }],
+    terminalAlternative: ctrlShiftBinding("PageUp"),
   },
   {
     id: "tab.selectByIndex",
@@ -241,7 +266,7 @@ export const SHORTCUTS: Shortcut[] = [
     id: "ai.askSelection",
     label: "向 AI 询问选区内容",
     group: "AI",
-    defaultBindings: [{ [MOD_PROP]: true, key: "j" }],
+    ...withTerminalAlternative("j", "l"),
   },
   {
     id: "sidebar.toggle",

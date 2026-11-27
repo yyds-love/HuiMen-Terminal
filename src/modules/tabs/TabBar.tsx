@@ -17,6 +17,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
+import { useShortcutLabel } from "@/modules/shortcuts";
 import {
   Cancel01Icon,
   Clock01Icon,
@@ -79,6 +80,7 @@ export function TabBar({
   const scrollRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const privateTabShortcut = useShortcutLabel("tab.newPrivate");
 
   // Play the enter animation only for tabs opened after the first paint, never
   // the restored set and never on switch/reorder (triggers are keyed, so they
@@ -359,9 +361,11 @@ export function TabBar({
                 strokeWidth={1.75}
               />
               <span className="flex-1">隐私</span>
-              <span className="text-xs text-muted-foreground">
-                {fmtShortcut(MOD_KEY, "R")}
-              </span>
+              {privateTabShortcut && (
+                <span className="text-xs text-muted-foreground">
+                  {privateTabShortcut}
+                </span>
+              )}
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewEditor()}>
               <HugeiconsIcon

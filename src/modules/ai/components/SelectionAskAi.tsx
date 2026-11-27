@@ -1,6 +1,6 @@
 import { Kbd, KbdGroup } from "@/components/ui/kbd";
-import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import type { PresenceState } from "@/lib/usePresence";
+import { useShortcutLabel } from "@/modules/shortcuts";
 import { useEffect, useRef } from "react";
 
 export type SelectionAskAiProps = {
@@ -23,6 +23,9 @@ export function SelectionAskAi({
 }: SelectionAskAiProps) {
   const pos = useRef({ top: 0, left: 0 });
   const open = state === "open";
+  const shortcutLabel = useShortcutLabel("ai.askSelection", {
+    preferTerminalAlternative: false,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -55,12 +58,16 @@ export function SelectionAskAi({
         }}
         className="flex h-8 w-full items-center justify-between gap-2 rounded-md border border-border bg-popover px-2.5 text-xs font-medium text-popover-foreground shadow-lg shadow-foreground/10 ring-1 ring-foreground/5 backdrop-blur-md hover:bg-accent hover:text-accent-foreground"
       >
-        <span className="min-w-0 shrink truncate whitespace-nowrap">向助手提问</span>
-        <KbdGroup className="shrink-0">
-          <Kbd className="h-4 min-w-4 rounded px-1 text-[10px] text-muted-foreground">
-            {fmtShortcut(MOD_KEY, "L")}
-          </Kbd>
-        </KbdGroup>
+        <span className="min-w-0 shrink truncate whitespace-nowrap">
+          向助手提问
+        </span>
+        {shortcutLabel && (
+          <KbdGroup className="shrink-0">
+            <Kbd className="h-4 min-w-4 rounded px-1 text-[10px] text-muted-foreground">
+              {shortcutLabel}
+            </Kbd>
+          </KbdGroup>
+        )}
       </button>
     </div>
   );

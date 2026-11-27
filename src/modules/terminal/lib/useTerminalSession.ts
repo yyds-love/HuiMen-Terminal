@@ -11,6 +11,7 @@ import {
   type VisibleBlocks,
 } from "../block/lib/blockDecorations";
 import type { BlockMode } from "../block/lib/modeMachine";
+import type { AgentType } from "./agentResume";
 import { DormantRing } from "./dormantRing";
 import {
   createShellIntegrationState,
@@ -71,6 +72,7 @@ type Session = {
   dormantRing: DormantRing;
   hasSlot: boolean;
   blocks: boolean;
+  agentType: AgentType | undefined;
   blockMode: BlockMode;
   blockListeners: Set<() => void>;
   blockDecorations: BlockDecorations | null;
@@ -97,7 +99,7 @@ type Session = {
   // startup query and emit its reply while `pty` is still null. Dropping that
   // reply hangs PSReadLine (blank box that never wakes). We queue and flush it
   // the moment the PTY handle lands.
-  pendingWrites: string[];
+  pendingWrites: Parameters<PtySession["write"]>[];
 };
 
 const sessions = new Map<number, Session>();
@@ -330,7 +332,7 @@ configureRendererPool({
     const s = sessions.get(leafId);
     if (!s) return null;
     return {
-      writeToPty: (data) => {
+      writeToPty: (data, consoleKey) => {
         // spawnFailed covers both a dead spawn (pty null) and a stalled
         // ConPTY (pty alive but mute); Enter retries with a fresh pty.
         if (s.spawnFailed) {
@@ -338,12 +340,16 @@ configureRendererPool({
           return;
         }
         if (s.pty) {
-          s.pty.write(data);
+          void s.pty.write(data, consoleKey).catch((error: unknown) => {
+            if (!s.disposed && !s.shellExited) {
+              console.warn("[terax] terminal input failed", error);
+            }
+          });
         } else if (!s.shellExited) {
           // PTY handle not assigned yet — queue (xterm's reply to the shell's
           // startup query lands here; dropping it hangs the shell). Flushed by
           // ensurePtyOpen / respawnSession once the handle arrives.
-          s.pendingWrites.push(data);
+          s.pendingWrites.push([data, consoleKey]);
         }
       },
       resizePty: (cols, rows) => {
@@ -376,6 +382,9 @@ configureRendererPool({
   isLeafBlocks(leafId) {
     return sessions.get(leafId)?.blocks ?? false;
   },
+  isLeafCodex(leafId) {
+    return sessions.get(leafId)?.agentType === "codex";
+  },
   isLeafBusy(leafId) {
     const s = sessions.get(leafId);
     return !!s && leafBusy(s);
@@ -397,9 +406,13 @@ function ensureSession(
   leafId: number,
   initialCwd?: string,
   blocks = false,
+  agentType?: AgentType,
 ): Session {
   const existing = sessions.get(leafId);
-  if (existing) return existing;
+  if (existing) {
+    existing.agentType = agentType;
+    return existing;
+  }
 
   const session: Session = {
     pty: null,
@@ -421,6 +434,7 @@ function ensureSession(
     dormantRing: new DormantRing(),
     hasSlot: false,
     blocks,
+    agentType,
     blockMode: "prompt",
     blockListeners: new Set(),
     blockDecorations: null,
@@ -634,7 +648,13 @@ function flushPendingWrites(s: Session, pty: PtySession): void {
   if (s.pendingWrites.length === 0) return;
   const queued = s.pendingWrites;
   s.pendingWrites = [];
-  for (const d of queued) pty.write(d);
+  for (const [data, consoleKey] of queued) {
+    void pty.write(data, consoleKey).catch((error: unknown) => {
+      if (!s.disposed && !s.shellExited) {
+        console.warn("[terax] queued terminal input failed", error);
+      }
+    });
+  }
 }
 
 // Start the shell for this leaf. The PTY needs neither fonts nor a measured
@@ -790,6 +810,7 @@ type Options = {
   focused?: boolean;
   initialCwd?: string;
   blocks?: boolean;
+  agentType?: AgentType;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (code: number) => void;
   onCwd?: (cwd: string) => void;
@@ -802,6 +823,7 @@ export function useTerminalSession({
   focused = true,
   initialCwd,
   blocks = false,
+  agentType,
   onSearchReady,
   onExit,
   onCwd,
@@ -814,10 +836,17 @@ export function useTerminalSession({
   // would detach/rebind the renderer slot (disposing block markers) on each cd.
   const initialCwdRef = useRef(initialCwd);
   initialCwdRef.current = initialCwd;
+  const agentTypeRef = useRef(agentType);
+  agentTypeRef.current = agentType;
 
   useEffect(() => {
     let cancelled = false;
-    const s = ensureSession(leafId, initialCwdRef.current, blocks);
+    const s = ensureSession(
+      leafId,
+      initialCwdRef.current,
+      blocks,
+      agentTypeRef.current,
+    );
 
     // Spawn the shell right away — independent of font loading and of whether
     // the container ref has committed yet. A live tab must never sit behind a
@@ -852,10 +881,20 @@ export function useTerminalSession({
     };
   }, [leafId, container, blocks]);
 
+  useEffect(() => {
+    const s = sessions.get(leafId);
+    if (s) s.agentType = agentType;
+  }, [leafId, agentType]);
+
   const [blockMode, setBlockMode] = useState<BlockMode>("prompt");
   useEffect(() => {
     if (!blocks) return;
-    const s = ensureSession(leafId, initialCwdRef.current, blocks);
+    const s = ensureSession(
+      leafId,
+      initialCwdRef.current,
+      blocks,
+      agentTypeRef.current,
+    );
     setBlockMode(s.blockMode);
     const cb = () => setBlockMode(sessions.get(leafId)?.blockMode ?? "prompt");
     s.blockListeners.add(cb);

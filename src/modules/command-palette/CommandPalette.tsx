@@ -12,6 +12,7 @@ import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
   getBindingTokens,
+  getShortcutBindings,
   SHORTCUTS,
   type KeyBinding,
   type ShortcutId,
@@ -522,7 +523,8 @@ function formatShortcut(
 ): string | null {
   if (!shortcutId) return null;
   const shortcut = SHORTCUTS_BY_ID.get(shortcutId);
-  const bindings = userShortcuts[shortcutId] ?? shortcut?.defaultBindings;
-  const tokens = getBindingTokens(bindings?.[0]);
+  if (!shortcut) return null;
+  const bindings = getShortcutBindings(shortcut, userShortcuts[shortcutId]);
+  const tokens = getBindingTokens(bindings[0]);
   return tokens.length ? tokens.join(" ") : null;
 }

@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -51,6 +51,21 @@ pub struct Session {
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub master: Mutex<Box<dyn MasterPty + Send>>,
     pub terminal_colors: Arc<Mutex<TerminalColors>>,
+}
+
+impl Session {
+    pub(super) fn write_input(&self, bytes: &[u8], console_key: Option<&str>) -> io::Result<()> {
+        let mut writer = self.writer.lock().unwrap();
+        #[cfg(windows)]
+        if let Some(key) = console_key {
+            if super::windows_console_input::try_write(self.shell_pid, bytes, key)? {
+                return Ok(());
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = console_key;
+        writer.write_all(bytes)
+    }
 }
 
 impl Drop for Session {

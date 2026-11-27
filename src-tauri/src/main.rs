@@ -2,6 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
+    #[cfg(windows)]
+    xuya_terminal_lib::modules::pty::run_console_key_helper();
+
     #[cfg(target_os = "macos")]
     {
         // Disable macOS press-and-hold character popup, so key repeat works in terminal.

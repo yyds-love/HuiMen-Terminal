@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
-
 import {
+  codexAltScreenWheelSequence,
   isTerminalCopyShortcut,
   isTerminalPasteShortcut,
+  type TerminalKeyEvent,
   terminalDeleteSequence,
   terminalLineNavigationSequence,
+  terminalModifiedKeyInput,
   terminalWordNavigationSequence,
-  type TerminalKeyEvent,
 } from "./keymap";
 
 const evt = (partial: Partial<TerminalKeyEvent>): TerminalKeyEvent => ({
@@ -76,7 +77,12 @@ describe("terminalLineNavigationSequence", () => {
   it("does not remap Cmd+Option+Arrow (selection-style combos pass through)", () => {
     expect(
       terminalLineNavigationSequence(
-        evt({ metaKey: true, altKey: true, key: "ArrowLeft", code: "ArrowLeft" }),
+        evt({
+          metaKey: true,
+          altKey: true,
+          key: "ArrowLeft",
+          code: "ArrowLeft",
+        }),
         { isMac: true },
       ),
     ).toBeNull();
@@ -131,10 +137,9 @@ describe("terminalDeleteSequence", () => {
 
   it("does not remap plain Backspace", () => {
     expect(
-      terminalDeleteSequence(
-        evt({ key: "Backspace", code: "Backspace" }),
-        { isMac: true },
-      ),
+      terminalDeleteSequence(evt({ key: "Backspace", code: "Backspace" }), {
+        isMac: true,
+      }),
     ).toBeNull();
   });
 });
@@ -179,5 +184,80 @@ describe("terminal clipboard shortcuts", () => {
         isMac: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("terminal modified keys", () => {
+  it.each([
+    [evt({ key: "Tab", shiftKey: true }), "\x1b[Z", "shift-tab"],
+    [evt({ key: "Enter", shiftKey: true }), "\x1b\r", "shift-enter"],
+    [evt({ key: "Enter", altKey: true }), "\x1b\r", "alt-enter"],
+    [evt({ key: "j", ctrlKey: true }), "\n", "ctrl-j"],
+  ])("sends key identity on Windows 10 1809 (%s)", (event, data, consoleKey) => {
+    expect(terminalModifiedKeyInput(event, true)).toEqual({ data, consoleKey });
+  });
+
+  it.each([
+    evt({ key: "Enter" }),
+    evt({ key: "Enter", ctrlKey: true }),
+    evt({ key: "Enter", ctrlKey: true, shiftKey: true }),
+    evt({ key: "Enter", metaKey: true, shiftKey: true }),
+    evt({ key: "Tab", ctrlKey: true, shiftKey: true }),
+    evt({ key: "j", ctrlKey: true, shiftKey: true }),
+  ])("leaves other keys to xterm (%s)", (event) => {
+    expect(terminalModifiedKeyInput(event, true)).toBeNull();
+  });
+
+  it("keeps existing input handling on other operating system versions", () => {
+    expect(
+      terminalModifiedKeyInput(evt({ key: "Enter", shiftKey: true }), false),
+    ).toEqual({ data: "\x1b\r" });
+    expect(
+      terminalModifiedKeyInput(evt({ key: "Tab", shiftKey: true }), false),
+    ).toBeNull();
+    expect(
+      terminalModifiedKeyInput(evt({ key: "Enter", altKey: true }), false),
+    ).toBeNull();
+    expect(
+      terminalModifiedKeyInput(evt({ key: "j", ctrlKey: true }), false),
+    ).toBeNull();
+  });
+});
+
+describe("codex alternate-screen wheel navigation", () => {
+  const modes = {
+    isCodex: true,
+    isAlternateBuffer: true,
+    mouseTrackingMode: "vt200" as const,
+    applicationCursorKeysMode: false,
+  };
+
+  it("maps wheel up and down to normal cursor-key sequences", () => {
+    expect(codexAltScreenWheelSequence({ deltaY: -40 }, modes)).toBe("\x1b[A");
+    expect(codexAltScreenWheelSequence({ deltaY: 40 }, modes)).toBe("\x1b[B");
+  });
+
+  it("uses application cursor-key sequences when enabled", () => {
+    expect(
+      codexAltScreenWheelSequence(
+        { deltaY: -40 },
+        { ...modes, applicationCursorKeysMode: true },
+      ),
+    ).toBe("\x1bOA");
+  });
+
+  it.each([
+    ["another agent", { ...modes, isCodex: false }],
+    ["the normal buffer", { ...modes, isAlternateBuffer: false }],
+    [
+      "disabled mouse tracking",
+      { ...modes, mouseTrackingMode: "none" as const },
+    ],
+  ])("leaves wheel input unchanged for %s", (_reason, otherModes) => {
+    expect(codexAltScreenWheelSequence({ deltaY: 40 }, otherModes)).toBeNull();
+  });
+
+  it("ignores horizontal-only wheel events", () => {
+    expect(codexAltScreenWheelSequence({ deltaY: 0 }, modes)).toBeNull();
   });
 });

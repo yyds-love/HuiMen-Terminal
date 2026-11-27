@@ -4,9 +4,13 @@ mod da_filter;
 mod job;
 mod session;
 pub(crate) mod shell_init;
+#[cfg(windows)]
+mod windows_console_input;
+
+#[cfg(windows)]
+pub use windows_console_input::run_console_key_helper;
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -129,19 +133,16 @@ pub fn pty_write(
             log::warn!("pty_write: unknown id={id}");
             "no session".to_string()
         })?;
-    // Bind to a local so the MutexGuard temporary drops before `session` —
-    // see rustc note on tail-expression temporary drop order.
-    let result = session
-        .writer
-        .lock()
-        .unwrap()
-        .write_all(bytes)
-        .map_err(|e| {
-            // EPIPE is expected if the child already exited.
-            log::debug!("pty_write id={id} failed: {e}");
-            e.to_string()
-        });
-    result
+    let console_key = request
+        .headers()
+        .get("x-pty-console-key")
+        .map(|value| value.to_str().map_err(|_| "pty_write: invalid console key"))
+        .transpose()?;
+    session.write_input(bytes, console_key).map_err(|e| {
+        // EPIPE is expected if the child already exited.
+        log::debug!("pty_write id={id} failed: {e}");
+        e.to_string()
+    })
 }
 
 #[tauri::command]

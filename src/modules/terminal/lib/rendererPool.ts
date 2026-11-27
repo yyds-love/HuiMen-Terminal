@@ -1,7 +1,9 @@
 import { detectMonoFontFamily } from "@/lib/fonts";
+import { IS_WINDOWS } from "@/lib/platform";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import { buildTerminalTheme } from "@/styles/terminalTheme";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { version } from "@tauri-apps/plugin-os";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -10,30 +12,35 @@ import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { shouldCursorBlink } from "./cursorBlink";
 import {
+  codexAltScreenWheelSequence,
   isTerminalCopyShortcut,
   isTerminalPasteShortcut,
   terminalDeleteSequence,
   terminalLineNavigationSequence,
+  terminalModifiedKeyInput,
   terminalWordNavigationSequence,
+  type WindowsConsoleKey,
 } from "./keymap";
 
 export const POOL_MAX_SIZE = 5;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const SNAPSHOT_SCROLLBACK_CAP = 5_000;
+const WINDOWS_1809 = IS_WINDOWS && version() === "10.0.17763";
 
 export type SlotAdapter = {
   resolveLeaf(leafId: number): LeafBridge | null;
   evictLeaf(leafId: number): void;
   isLeafFocused(leafId: number): boolean;
   isLeafBlocks(leafId: number): boolean;
+  isLeafCodex(leafId: number): boolean;
   isLeafBusy(leafId: number): boolean;
   isLeafVisible(leafId: number): boolean;
   storeSnapshot(leafId: number, out: SerializeOutput): void;
 };
 
 export type LeafBridge = {
-  writeToPty(data: string): void;
+  writeToPty(data: string, consoleKey?: WindowsConsoleKey): void;
   resizePty(cols: number, rows: number): void;
   // Force a SIGWINCH on the underlying PTY at the given dims. Implemented
   // as a +1 row / restore bump because the Linux kernel suppresses winsize
@@ -193,10 +200,7 @@ function termOptions() {
     cursorStyle: "bar" as const,
     cursorInactiveStyle: "outline" as const,
     scrollback: prefs.terminalScrollback,
-    // 备用屏幕(less/man/Codex/Claude Code 等全屏 TUI)下默认无 scrollback 且
-    // 滚轮不做事;开启后 xterm 会把滚轮/触控板滚动翻译成 ↑/↓ 方向键发给应用,
-    // 让这类应用可用鼠标滚动。
-    altScrollMouse: true,
+    // xterm forwards alternate-buffer wheel input as arrow keys when mouse reporting is off.
     allowProposedApi: true,
     minimumContrastRatio: terminalMinimumContrastRatio(prefs),
   };
@@ -228,9 +232,7 @@ function createSlot(): Slot {
   getRecycler().appendChild(host);
   term.open(host);
 
-  // Shift + 滚轮:绕过应用的鼠标跟踪(mouse tracking),强制滚动终端自身缓冲区。
-  // 主流终端(iTerm2/Windows Terminal/WezTerm)的通用约定。capture 阶段挂在 host
-  // (xterm-viewport 的祖先),先于 xterm 自身的 wheel 处理,从而拦截事件不发往应用。
+  // Shift+wheel bypasses application mouse tracking and scrolls the xterm buffer.
   host.addEventListener(
     "wheel",
     (e: WheelEvent) => {
@@ -273,6 +275,24 @@ function createSlot(): Slot {
     lastUsedAt: 0,
   };
 
+  term.attachCustomWheelEventHandler((event) => {
+    const leafId = slot.currentLeafId;
+    if (leafId === null) return true;
+    const bridge = adapter?.resolveLeaf(leafId);
+    if (!bridge) return true;
+
+    const sequence = codexAltScreenWheelSequence(event, {
+      isCodex: adapter?.isLeafCodex(leafId) ?? false,
+      isAlternateBuffer: term.buffer.active.type === "alternate",
+      mouseTrackingMode: term.modes.mouseTrackingMode,
+      applicationCursorKeysMode: term.modes.applicationCursorKeysMode,
+    });
+    if (!sequence) return true;
+
+    bridge.writeToPty(sequence);
+    return false;
+  });
+
   term.attachCustomKeyEventHandler((event) => {
     // During IME composition the browser is assembling a multi-keystroke
     // character (Chinese pinyin → hanzi, Korean jamo → syllable, etc.).
@@ -307,9 +327,12 @@ function createSlot(): Slot {
       if (event.type === "keydown") bridge.writeToPty(deleteSeq);
       return false;
     }
-    if (isShiftEnter(event)) {
+    const modifiedKey = terminalModifiedKeyInput(event, WINDOWS_1809);
+    if (modifiedKey) {
       event.preventDefault();
-      if (event.type === "keydown") bridge.writeToPty("\x1b\r");
+      if (event.type === "keydown") {
+        bridge.writeToPty(modifiedKey.data, modifiedKey.consoleKey);
+      }
       return false;
     }
     if (isTerminalCopy(event)) {
@@ -1112,10 +1135,4 @@ function isTerminalCopy(e: KeyboardEvent): boolean {
 
 function isTerminalPaste(e: KeyboardEvent): boolean {
   return isTerminalPasteShortcut(e, { isMac: IS_MAC });
-}
-
-function isShiftEnter(e: KeyboardEvent): boolean {
-  return (
-    e.key === "Enter" && e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey
-  );
 }

@@ -41,6 +41,7 @@ import {
 import type { PreviewPaneHandle } from "@/modules/preview";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import {
+  isTerminalKeyTarget,
   useGlobalShortcuts,
   type ShortcutHandlers,
   type ShortcutId,
@@ -97,6 +98,17 @@ import { WorkspaceSurface } from "./components/WorkspaceSurface";
 import { useTabCloseGuards } from "./hooks/useTabCloseGuards";
 import { useWorkspaceSwitcher } from "./hooks/useWorkspaceSwitcher";
 import { open } from "@tauri-apps/plugin-dialog";
+
+const TERMINAL_DEFERRED_MAC_SHORTCUTS = new Set<ShortcutId>([
+  "tab.new",
+  "tab.newEditor",
+  "pane.splitRight",
+  "pane.source",
+  "terminal.toggleInput",
+  "search.focus",
+  "ai.toggle",
+  "sidebar.toggle",
+]);
 
 export default function App() {
   const {
@@ -724,51 +736,19 @@ export default function App() {
       if (id === "editor.undo" || id === "editor.redo") {
         return activeTab?.kind !== "editor";
       }
-
-      // 终端聚焦时，部分快捷键会与 shell/readline/CLI（vim、tmux、Claude Code 等）
-      // 冲突，此时放行让按键直达终端，而非被全局层（capture 阶段）吞掉。
-      const isTerminalFocused = () => {
-        const target = (e.target as HTMLElement | null) ?? document.activeElement;
-        return !!(target as HTMLElement | null)?.closest?.(".xterm");
-      };
-
-      // 这些键在终端内交给终端/shell/CLI 处理，避免抢走原生终端习惯。
-      const deferInTerminal: ReadonlySet<ShortcutId> = new Set<ShortcutId>([
-        "tab.new", // Ctrl+T：tmux 前缀、shell 字符互换
-        "tab.newEditor", // Ctrl+E：emacs/readline 行尾
-        "pane.splitRight", // Ctrl+D：EOF / 退出 shell
-        "pane.source", // Ctrl+G：readline abort
-        "terminal.toggleInput", // Ctrl+U：readline 删除至行首
-        "search.focus", // Ctrl+F：shell 前向搜索 / vim
-        "ai.toggle", // Ctrl+I（等价 Tab）：终端补全
-        "tab.next", // Ctrl+Tab：部分 TUI 需要制表符
-        "tab.prev", // Ctrl+Shift+Tab
-      ]);
-      if (deferInTerminal.has(id)) {
-        return isTerminalFocused();
+      const terminalFocused = isTerminalKeyTarget(e);
+      if (id === "terminal.clear") return !terminalFocused;
+      if (id === "ai.askSelection" && terminalFocused) {
+        return !captureActiveSelection()?.trim();
       }
-
-      if (id === "ai.askSelection") {
-        if (!isTerminalFocused()) return false;
-        const sel = captureActiveSelection();
-        return !sel || !sel.trim();
-      }
-      if (id === "terminal.clear") {
-        // Only intercept ⌘K while a terminal is focused; elsewhere let the key
-        // fall through (we never preventDefault when disabled).
-        return !isTerminalFocused();
-      }
-      if (id === "sidebar.toggle") {
-        // Ctrl+B is also Claude Code's "run in background" key. While a terminal
-        // is focused, let Ctrl+B reach the shell/Claude instead of toggling the
-        // sidebar. Ctrl+Shift+B (second binding) still toggles it from anywhere.
-        // Only defer the plain (no-shift) Ctrl/⌘+B binding; the Shift variant
-        // is the always-on toggle and is never claimed by the terminal.
-        return isTerminalFocused() && !e.shiftKey;
-      }
-      return false;
+      return (
+        terminalFocused &&
+        e.metaKey &&
+        !e.shiftKey &&
+        TERMINAL_DEFERRED_MAC_SHORTCUTS.has(id)
+      );
     },
-    [activeTab],
+    [activeTab?.kind, captureActiveSelection],
   );
 
   useGlobalShortcuts(shortcutHandlers, { isDisabled: shortcutsDisabled });

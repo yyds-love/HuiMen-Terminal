@@ -6,8 +6,8 @@ type Params = {
 };
 
 /**
- * Tracks text selections inside the terminal / editor and surfaces the
- * "Ask AI" popup at the pointer. Dismisses on any click outside the AI surface.
+ * Tracks editor text selections and surfaces the "Ask AI" popup at the pointer.
+ * Dismisses on any click outside the AI surface.
  */
 export function useSelectionAskAi({
   captureActiveSelection,
@@ -35,9 +35,8 @@ export function useSelectionAskAi({
     const onUp = (e: MouseEvent) => {
       if (isInsideAi(e.target)) return;
       const el = e.target as HTMLElement | null;
-      const inContentArea = el?.closest?.(".xterm, .cm-editor");
-      if (!inContentArea) return;
-      // Defer one tick so xterm/CodeMirror finalize the selection.
+      if (!el?.closest?.(".cm-editor")) return;
+      // Defer one tick so CodeMirror finalizes the selection.
       setTimeout(() => {
         const text = captureActiveSelection();
         if (text && text.trim().length > 0) {

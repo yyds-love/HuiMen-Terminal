@@ -5,7 +5,68 @@ export type TerminalKeyEvent = Pick<
 
 export type PlatformOpts = { isMac: boolean };
 
-export function terminalWordNavigationSequence(event: TerminalKeyEvent): string | null {
+export type WindowsConsoleKey =
+  | "shift-tab"
+  | "shift-enter"
+  | "alt-enter"
+  | "ctrl-j";
+
+export function terminalModifiedKeyInput(
+  event: TerminalKeyEvent,
+  windows1809: boolean,
+): { data: string; consoleKey?: WindowsConsoleKey } | null {
+  const { key, altKey, ctrlKey, metaKey, shiftKey } = event;
+  if (metaKey) return null;
+
+  if (key === "Enter" && shiftKey && !altKey && !ctrlKey) {
+    return {
+      data: "\x1b\r",
+      consoleKey: windows1809 ? "shift-enter" : undefined,
+    };
+  }
+  if (!windows1809) return null;
+  // ConPTY 1809 drops back-tab, duplicates modified Return, and reports LF
+  // as Ctrl+Return. Identify the actual key separately from the input bytes.
+  if (key === "Tab" && shiftKey && !altKey && !ctrlKey) {
+    return { data: "\x1b[Z", consoleKey: "shift-tab" };
+  }
+  if (key === "Enter" && altKey && !shiftKey && !ctrlKey) {
+    return { data: "\x1b\r", consoleKey: "alt-enter" };
+  }
+  if (key.toLowerCase() === "j" && ctrlKey && !shiftKey && !altKey) {
+    return { data: "\n", consoleKey: "ctrl-j" };
+  }
+  return null;
+}
+
+export type TerminalWheelModes = {
+  isCodex: boolean;
+  isAlternateBuffer: boolean;
+  mouseTrackingMode: "none" | "x10" | "vt200" | "drag" | "any";
+  applicationCursorKeysMode: boolean;
+};
+
+export function codexAltScreenWheelSequence(
+  event: Pick<WheelEvent, "deltaY">,
+  modes: TerminalWheelModes,
+): string | null {
+  if (
+    !modes.isCodex ||
+    !modes.isAlternateBuffer ||
+    modes.mouseTrackingMode === "none" ||
+    event.deltaY === 0
+  ) {
+    return null;
+  }
+
+  const direction = event.deltaY < 0 ? "A" : "B";
+  const cursorMode = modes.applicationCursorKeysMode ? "O" : "[";
+  return `\x1b${cursorMode}${direction}`;
+}
+
+export function terminalWordNavigationSequence(
+  event: TerminalKeyEvent,
+): string | null {
   if (!event.altKey || event.ctrlKey || event.metaKey) return null;
   if (event.key === "ArrowLeft" || event.code === "ArrowLeft") return "\x1bb";
   if (event.key === "ArrowRight" || event.code === "ArrowRight") return "\x1bf";
@@ -48,7 +109,8 @@ export function isTerminalCopyShortcut(
   event: TerminalKeyEvent,
   opts: PlatformOpts,
 ): boolean {
-  const isCopyKey = event.code === "KeyC" || event.key === "c" || event.key === "C";
+  const isCopyKey =
+    event.code === "KeyC" || event.key === "c" || event.key === "C";
   if (!isCopyKey || event.altKey) return false;
   if (opts.isMac) return event.metaKey && !event.ctrlKey && !event.shiftKey;
   return !!event.ctrlKey && !!event.shiftKey && !event.metaKey;
@@ -58,7 +120,8 @@ export function isTerminalPasteShortcut(
   event: TerminalKeyEvent,
   opts: PlatformOpts,
 ): boolean {
-  const isPasteKey = event.code === "KeyV" || event.key === "v" || event.key === "V";
+  const isPasteKey =
+    event.code === "KeyV" || event.key === "v" || event.key === "V";
   if (!isPasteKey || event.altKey) return false;
   if (opts.isMac) return event.metaKey && !event.ctrlKey && !event.shiftKey;
   return !!event.ctrlKey && !!event.shiftKey && !event.metaKey;

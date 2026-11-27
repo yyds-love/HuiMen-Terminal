@@ -74,6 +74,7 @@ export const TerminalPane = memo(
       focused,
       initialCwd,
       blocks,
+      agentType,
       onSearchReady: (a) => onSearchReady?.(leafId, a),
       onExit: (c) => onExit?.(leafId, c),
       onCwd: (c) => onCwd?.(leafId, c),

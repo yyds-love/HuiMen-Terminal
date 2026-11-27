@@ -5,6 +5,7 @@ import { usePreferencesStore } from "@/modules/settings/preferences";
 import { setShortcuts } from "@/modules/settings/store";
 import {
   getBindingTokens,
+  getShortcutBindings,
   SHORTCUTS,
   SHORTCUT_GROUPS,
   type KeyBinding,
@@ -80,7 +81,7 @@ export function ShortcutsSection() {
       <div className="flex items-center justify-between">
         <SectionHeader
           title="快捷键"
-          description="查看和自定义键盘快捷键。"
+          description="查看和自定义键盘快捷键。终端聚焦时，常用终端按键优先。"
         />
         <Button
           variant="outline"
@@ -187,10 +188,9 @@ function ShortcutRow({
   userBindings?: KeyBinding[];
   readonly?: boolean;
 }) {
-  const bindings =
-    userBindings !== undefined ? userBindings : shortcut.defaultBindings;
+  const bindings = getShortcutBindings(shortcut, userBindings);
   const isModified = userBindings !== undefined;
-  const hasBindings = bindings && bindings.length > 0;
+  const hasBindings = bindings.length > 0;
 
   return (
     <div className="group flex items-center justify-between px-3 py-2.5 transition-colors hover:bg-muted/30">
