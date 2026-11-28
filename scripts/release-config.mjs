@@ -32,3 +32,9 @@ export function repositoryFromEndpoint(endpoint) {
   if (!match) throw new Error("Updater endpoint must be the HTTPS GitHub latest.json release URL.");
   return validateRepository(match[1]);
 }
+
+export function repositoryFromGitHubUrl(value) {
+  const match = typeof value === "string" && /^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(value);
+  if (!match) throw new Error("Package source URLs must point to a GitHub repository.");
+  return validateRepository(match[1]);
+}

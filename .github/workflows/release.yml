@@ -9,6 +9,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  UPDATE_REPOSITORY: yyds-love/HuiMen-Terminal-Updates
+
 jobs:
   preflight:
     runs-on: ubuntu-22.04
@@ -29,6 +32,28 @@ jobs:
         run: |
           if [ -z "$UPDATE_SIGNING_KEY" ]; then
             echo "Configure TAURI_SIGNING_PRIVATE_KEY before releasing."
+            exit 1
+          fi
+      - name: Require updater repository token
+        env:
+          UPDATE_REPO_TOKEN: ${{ secrets.UPDATE_REPO_TOKEN }}
+        run: |
+          if [ -z "$UPDATE_REPO_TOKEN" ]; then
+            echo "Configure UPDATE_REPO_TOKEN with contents:write access to $UPDATE_REPOSITORY."
+            exit 1
+          fi
+      - name: Verify the updater repository is public and initialized
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_REPO_TOKEN }}
+        run: |
+          repository_info="$(gh api "repos/$UPDATE_REPOSITORY" --jq '[.private, .default_branch] | @tsv')"
+          read -r is_private default_branch <<< "$repository_info"
+          if [ "$is_private" != "false" ]; then
+            echo "$UPDATE_REPOSITORY must be public for application updates."
+            exit 1
+          fi
+          if [ "$default_branch" != "main" ]; then
+            echo "$UPDATE_REPOSITORY must have an initialized main branch."
             exit 1
           fi
       - name: Install frontend dependencies
@@ -131,3 +156,52 @@ jobs:
           includeUpdaterJson: true
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }} -- --locked
+
+  publish-updates:
+    needs: publish-tauri
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed release assets from the private source repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir release-assets
+
+      - name: Point the updater manifest at public release assets
+        run: >-
+          node scripts/rewrite-updater-manifest.mjs
+          release-assets/latest.json
+          "$GITHUB_REPOSITORY"
+          "$UPDATE_REPOSITORY"
+          "${GITHUB_REF_NAME#v}"
+
+      - name: Publish the signed update channel
+        env:
+          GH_TOKEN: ${{ secrets.UPDATE_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="${GITHUB_REF_NAME#v}"
+
+          if gh release view "$tag" --repo "$UPDATE_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$tag" --repo "$UPDATE_REPOSITORY" --json isDraft --jq .isDraft)"
+            if [ "$is_draft" != "true" ]; then
+              echo "Release $tag is already published in $UPDATE_REPOSITORY."
+              exit 0
+            fi
+          else
+            gh release create "$tag" \
+              --repo "$UPDATE_REPOSITORY" \
+              --target main \
+              --draft \
+              --title "XuYa Terminal $tag" \
+              --notes "Signed updater assets for XuYa Terminal $version."
+          fi
+
+          gh release upload "$tag" release-assets/* \
+            --repo "$UPDATE_REPOSITORY" \
+            --clobber
+          gh release edit "$tag" --repo "$UPDATE_REPOSITORY" --draft=false

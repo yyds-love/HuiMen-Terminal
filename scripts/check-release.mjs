@@ -1,5 +1,10 @@
 import { readFileSync } from "node:fs";
-import { repositoryFromEndpoint, validatePublicKey, validateRepository } from "./release-config.mjs";
+import {
+  repositoryFromEndpoint,
+  repositoryFromGitHubUrl,
+  validatePublicKey,
+  validateRepository,
+} from "./release-config.mjs";
 
 function readJson(path) { return JSON.parse(readFileSync(path, "utf8")); }
 function sectionVersion(path, section) {
@@ -36,13 +41,19 @@ try {
   const updater = config.plugins?.updater;
   validatePublicKey(updater?.pubkey);
   if (!Array.isArray(updater.endpoints) || updater.endpoints.length !== 1) throw new Error("Configure exactly one updater endpoint.");
-  const repository = repositoryFromEndpoint(updater.endpoints[0]);
-  if (process.env.GITHUB_REPOSITORY && repository.toLowerCase() !== validateRepository(process.env.GITHUB_REPOSITORY).toLowerCase()) {
-    throw new Error("Updater repository differs from the GitHub Actions repository.");
+  const updaterRepository = repositoryFromEndpoint(updater.endpoints[0]);
+  if (process.env.UPDATE_REPOSITORY && updaterRepository.toLowerCase() !== validateRepository(process.env.UPDATE_REPOSITORY).toLowerCase()) {
+    throw new Error("Updater endpoint differs from UPDATE_REPOSITORY.");
   }
-  const url = `https://github.com/${repository}`;
-  if (pkg.homepage !== url || pkg.repository?.url !== `${url}.git`) throw new Error("Package source URLs differ from the updater repository. Run release:configure.");
-  console.log(`Release preflight passed: v${version}, ${repository}.`);
+  const homepageRepository = repositoryFromGitHubUrl(pkg.homepage);
+  const packageRepository = repositoryFromGitHubUrl(pkg.repository?.url);
+  if (homepageRepository.toLowerCase() !== packageRepository.toLowerCase()) {
+    throw new Error("Package homepage and repository URLs must match.");
+  }
+  if (process.env.GITHUB_REPOSITORY && homepageRepository.toLowerCase() !== validateRepository(process.env.GITHUB_REPOSITORY).toLowerCase()) {
+    throw new Error("Package source URLs differ from the GitHub Actions repository.");
+  }
+  console.log(`Release preflight passed: v${version}, source ${homepageRepository}, updater ${updaterRepository}.`);
 } catch (error) {
   console.error(`Release preflight failed: ${error.message}`);
   process.exitCode = 1;

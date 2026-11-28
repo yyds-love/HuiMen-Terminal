@@ -14,8 +14,9 @@ function replaceFile(path, content) {
 }
 
 try {
-  const { values } = parseArgs({ options: { repository: { type: "string" }, "public-key": { type: "string" } } });
+  const { values } = parseArgs({ options: { repository: { type: "string" }, "updater-repository": { type: "string" }, "public-key": { type: "string" } } });
   const repository = validateRepository(values.repository);
+  const updaterRepository = validateRepository(values["updater-repository"] ?? repository);
   const publicPath = values["public-key"];
   if (!publicPath?.endsWith(".pub")) throw new Error("--public-key must point to the generated .pub public-key file; never pass a private key.");
   const pubkey = validatePublicKey(readFileSync(publicPath, "utf8").trim());
@@ -26,16 +27,17 @@ try {
   const config = JSON.parse(previousConfig);
   const pkg = JSON.parse(previousPackage);
   const url = `https://github.com/${repository}`;
+  const updaterUrl = `https://github.com/${updaterRepository}`;
   config.bundle ??= {};
   config.bundle.createUpdaterArtifacts = true;
   config.plugins ??= {};
-  config.plugins.updater = { ...config.plugins.updater, pubkey, endpoints: [`${url}/releases/latest/download/latest.json`] };
+  config.plugins.updater = { ...config.plugins.updater, pubkey, endpoints: [`${updaterUrl}/releases/latest/download/latest.json`] };
   pkg.homepage = url;
   pkg.repository = { type: "git", url: `${url}.git` };
   replaceFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
   try { replaceFile(packagePath, `${JSON.stringify(pkg, null, 2)}\n`); }
   catch (error) { replaceFile(configPath, previousConfig); throw error; }
-  console.log(`Release channel configured for ${repository}. Run pnpm release:check before building.`);
+  console.log(`Release source configured for ${repository}; updater channel configured for ${updaterRepository}. Run pnpm release:check before building.`);
 } catch (error) {
   console.error(`Release configuration failed: ${error.message}`);
   process.exitCode = 1;

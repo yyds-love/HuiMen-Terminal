@@ -28,13 +28,23 @@ function fixture(t) {
   writeFileSync(join(directory, "Cargo.lock"), '[[package]]\nname = "xuya-terminal"\nversion = "1.0.7"\n');
   const pubPath = join(directory, "release.pub"); writeFileSync(pubPath, publicKey);
   function run(script, args = [], extra = {}) {
-    return spawnSync(process.execPath, [join(scripts, script), ...args], { cwd: directory, encoding: "utf8", env: { ...process.env, GITHUB_REPOSITORY: repo, GITHUB_REF_NAME: "v1.0.7", ...extra } });
+    return spawnSync(process.execPath, [join(scripts, script), ...args], { cwd: directory, encoding: "utf8", env: { ...process.env, GITHUB_REPOSITORY: repo, UPDATE_REPOSITORY: repo, GITHUB_REF_NAME: "v1.0.7", ...extra } });
   }
   return { directory, config, pkg, pubPath, json, run };
 }
 
 test("accepts a consistent signed release and matching GitHub tag", (t) => {
   const f = fixture(t); const result = f.run("check-release.mjs");
+  assert.equal(result.status, 0, result.stderr);
+});
+test("accepts a private source repository with a separate public updater repository", (t) => {
+  const f = fixture(t);
+  const updateRepo = "example/terminal-updates";
+  f.config.plugins.updater.endpoints = [`https://github.com/${updateRepo}/releases/latest/download/latest.json`];
+  f.json("src-tauri/tauri.conf.json", f.config);
+
+  const result = f.run("check-release.mjs", [], { UPDATE_REPOSITORY: updateRepo });
+
   assert.equal(result.status, 0, result.stderr);
 });
 for (const file of ["package.json", "src-tauri/tauri.conf.json", "Cargo.toml", "src-tauri/Cargo.toml", "Cargo.lock"]) {
@@ -70,6 +80,27 @@ test("configures public release identity consistently without touching versions"
   assert.equal(f.run("check-release.mjs").status, 0);
   assert.equal(JSON.parse(readFileSync(join(f.directory, "package.json"))).version, "1.0.7");
 });
+test("configures a separate updater repository without changing the source repository", (t) => {
+  const f = fixture(t);
+  f.config.bundle.createUpdaterArtifacts = false;
+  f.config.plugins.updater = { pubkey: "", endpoints: [] };
+  f.json("src-tauri/tauri.conf.json", f.config);
+  const updateRepo = "example/terminal-updates";
+
+  const result = f.run("configure-release.mjs", [
+    "--repository", repo,
+    "--updater-repository", updateRepo,
+    "--public-key", f.pubPath,
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(readFileSync(join(f.directory, "package.json"))).homepage, url);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(f.directory, "src-tauri/tauri.conf.json"))).plugins.updater.endpoints,
+    [`https://github.com/${updateRepo}/releases/latest/download/latest.json`],
+  );
+  assert.equal(f.run("check-release.mjs", [], { UPDATE_REPOSITORY: updateRepo }).status, 0);
+});
 test("invalid input leaves both release configuration files unchanged", (t) => {
   const f = fixture(t); const configPath = join(f.directory, "src-tauri/tauri.conf.json"); const pkgPath = join(f.directory, "package.json");
   const before = [readFileSync(configPath, "utf8"), readFileSync(pkgPath, "utf8")];
@@ -81,4 +112,72 @@ test("refuses private-key file paths before trying to read them", (t) => {
   const f = fixture(t);
   const result = f.run("configure-release.mjs", ["--repository", repo, "--public-key", join(f.directory, "do-not-read.key")]);
   assert.notEqual(result.status, 0); assert.match(result.stderr, /\.pub/);
+});
+
+test("rewrites signed updater URLs to the public updater release while preserving signatures", (t) => {
+  const f = fixture(t);
+  const manifestPath = join(f.directory, "latest.json");
+  const updateRepo = "example/terminal-updates";
+  const manifest = {
+    version: "1.0.7",
+    notes: "Release notes",
+    platforms: {
+      "windows-x86_64-nsis": {
+        signature: "windows-signature",
+        url: `${url}/releases/download/v1.0.7/Xuya.Terminal_1.0.7_x64-setup.exe.zip`,
+      },
+      "darwin-aarch64": {
+        signature: "mac-signature",
+        url: `${url}/releases/download/v1.0.7/Xuya.Terminal_aarch64.app.tar.gz`,
+      },
+    },
+  };
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  const result = f.run("rewrite-updater-manifest.mjs", [
+    manifestPath,
+    repo,
+    updateRepo,
+    "1.0.7",
+  ]);
+
+  assert.equal(result.status, 0, result.stderr);
+  const rewritten = JSON.parse(readFileSync(manifestPath, "utf8"));
+  assert.equal(rewritten.version, manifest.version);
+  assert.equal(rewritten.notes, manifest.notes);
+  assert.equal(rewritten.platforms["windows-x86_64-nsis"].signature, "windows-signature");
+  assert.equal(
+    rewritten.platforms["windows-x86_64-nsis"].url,
+    `https://github.com/${updateRepo}/releases/download/v1.0.7/Xuya.Terminal_1.0.7_x64-setup.exe.zip`,
+  );
+  assert.equal(
+    rewritten.platforms["darwin-aarch64"].url,
+    `https://github.com/${updateRepo}/releases/download/v1.0.7/Xuya.Terminal_aarch64.app.tar.gz`,
+  );
+});
+
+test("refuses to rewrite an updater manifest with an unexpected release asset URL", (t) => {
+  const f = fixture(t);
+  const manifestPath = join(f.directory, "latest.json");
+  const manifest = {
+    version: "1.0.7",
+    platforms: {
+      windows: {
+        signature: "signature",
+        url: "https://example.com/malicious-installer.exe",
+      },
+    },
+  };
+  const original = `${JSON.stringify(manifest, null, 2)}\n`;
+  writeFileSync(manifestPath, original);
+
+  const result = f.run("rewrite-updater-manifest.mjs", [
+    manifestPath,
+    repo,
+    "example/terminal-updates",
+    "1.0.7",
+  ]);
+
+  assert.notEqual(result.status, 0);
+  assert.equal(readFileSync(manifestPath, "utf8"), original);
 });
