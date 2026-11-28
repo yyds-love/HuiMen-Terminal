@@ -45,7 +45,7 @@
     "@ai-sdk/google": "^3.0.80",
     "@ai-sdk/groq": "^3.0.39",
     "@ai-sdk/openai": "^3.0.67",
-    "@ai-sdk/openai-compatible": "^2.0.48",
+    "@ai-sdk/openai-compatible": "^3.0.94",
     "@ai-sdk/react": "^3.0.198",
     "@ai-sdk/xai": "^3.0.93",
     "@atlaskit/pragmatic-drag-and-drop": "^1.8.1",
