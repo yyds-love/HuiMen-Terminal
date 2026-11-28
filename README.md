@@ -35,7 +35,7 @@ XuYa Terminal 正在活跃开发中，当前面向 Windows、macOS 和 Linux 桌
 
 推荐环境：
 
-- Windows 10 / Windows 11
+- Windows 10 version 1809 (build 17763) or later / Windows 11
 - Node.js 22+
 - `package.json` 中固定版本的 pnpm
 - Rust stable toolchain

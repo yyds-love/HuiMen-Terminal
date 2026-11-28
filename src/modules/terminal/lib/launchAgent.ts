@@ -1,6 +1,14 @@
-import { submitToLeaf, whenSessionReady } from "./useTerminalSession";
-import { agentBareCommand, agentResumeCommand, type AgentType } from "./agentResume";
+import {
+  type AgentType,
+  agentBareCommand,
+  agentResumeCommand,
+} from "./agentResume";
 import { captureAgentSession, claimAgentSession } from "./agentSessionCapture";
+import {
+  submitToLeaf,
+  usesCodexInlineScrollback,
+  whenSessionReady,
+} from "./useTerminalSession";
 
 export type LaunchAgentOpts = {
   /** When set, resume this exact session instead of starting fresh. */
@@ -15,15 +23,23 @@ export type LaunchAgentOpts = {
 
 async function submitWhenWritable(
   leafId: number,
-  command: string,
+  agent: AgentType,
+  sessionId?: string,
   timeoutMs = 7000,
 ): Promise<boolean> {
+  const submit = () => {
+    const inlineScrollback = usesCodexInlineScrollback(leafId);
+    const command = sessionId
+      ? agentResumeCommand(agent, sessionId, inlineScrollback)
+      : agentBareCommand(agent, inlineScrollback);
+    return submitToLeaf(leafId, command);
+  };
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    if (submitToLeaf(leafId, command)) return true;
+    if (submit()) return true;
     await new Promise((resolve) => setTimeout(resolve, 80));
   }
-  return submitToLeaf(leafId, command);
+  return submit();
 }
 
 /**
@@ -44,10 +60,7 @@ export async function launchAgentInLeaf(
   // A resumed/restored session already belongs to this leaf — claim it so a
   // concurrently-launched agent in the same cwd can't capture it.
   if (opts.sessionId) claimAgentSession(opts.sessionId);
-  const command = opts.sessionId
-    ? agentResumeCommand(agent, opts.sessionId)
-    : agentBareCommand(agent);
-  const submitted = await submitWhenWritable(leafId, command);
+  const submitted = await submitWhenWritable(leafId, agent, opts.sessionId);
   if (!submitted) {
     console.warn("[terax] agent launch command could not be submitted", leafId);
     return;

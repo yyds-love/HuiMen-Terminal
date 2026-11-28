@@ -51,6 +51,7 @@ type Params = {
   newAgentTab: (
     cwd: string | undefined,
     title: string,
+    agentType?: "claude" | "codex" | "opencode",
   ) => { tabId: number; leafId: number };
   terminalRefs: RefObject<Map<number, TerminalPaneHandle>>;
 };
@@ -137,6 +138,7 @@ export function useAiLiveBridge(params: Params) {
         const { tabId, leafId } = ref.current.newAgentTab(
           cwd ?? undefined,
           `claude · ${short}`,
+          "claude",
         );
         useManagedAgentsStore
           .getState()

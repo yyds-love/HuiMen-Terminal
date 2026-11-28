@@ -1,9 +1,11 @@
+import { IS_WINDOWS_1809 } from "@/lib/platform";
 import { currentWorkspaceEnv } from "@/modules/workspace";
 import {
   currentTerminalAppearance,
   type TerminalAppearance,
 } from "@/styles/terminalTheme";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { AgentType } from "./agentResume";
 import type { WindowsConsoleKey } from "./keymap";
 
 const textEncoder = new TextEncoder();
@@ -15,6 +17,7 @@ export type PtyHandlers = {
 
 export type PtySession = {
   id: number;
+  codexInlineScrollback: boolean;
   write: (data: string, consoleKey?: WindowsConsoleKey) => Promise<void>;
   resize: (cols: number, rows: number) => Promise<void>;
   setAppearance: (appearance?: TerminalAppearance) => Promise<void>;
@@ -27,6 +30,7 @@ export async function openPty(
   handlers: PtyHandlers,
   cwd?: string,
   blocks?: boolean,
+  agentType?: AgentType,
   appearance: TerminalAppearance = currentTerminalAppearance(),
 ): Promise<PtySession> {
   // Raw bytes — no base64/JSON round-trip; messages arrive as ArrayBuffer.
@@ -48,12 +52,16 @@ export async function openPty(
     releaseHandlers();
   };
 
+  const workspace = currentWorkspaceEnv();
+  const codexInlineScrollback =
+    IS_WINDOWS_1809 && workspace.kind === "local" && agentType === "codex";
   const id = await invoke<number>("pty_open", {
     cols,
     rows,
     cwd: cwd ?? null,
-    workspace: currentWorkspaceEnv(),
+    workspace,
     blocks: blocks ?? false,
+    agentType: agentType ?? null,
     appearance,
     onData,
     onExit,
@@ -64,6 +72,7 @@ export async function openPty(
 
   return {
     id,
+    codexInlineScrollback,
     // Raw bytes + id header: no JSON round-trip on the per-keystroke path.
     write: (data, consoleKey) =>
       invoke("pty_write", textEncoder.encode(data), {

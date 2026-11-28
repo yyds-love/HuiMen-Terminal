@@ -160,6 +160,10 @@ export function submitToLeaf(leafId: number, text: string): boolean {
   return true;
 }
 
+export function usesCodexInlineScrollback(leafId: number): boolean {
+  return sessions.get(leafId)?.pty?.codexInlineScrollback ?? false;
+}
+
 export function interruptLeaf(leafId: number): void {
   sessions.get(leafId)?.pty?.write("\x03");
 }
@@ -382,9 +386,6 @@ configureRendererPool({
   isLeafBlocks(leafId) {
     return sessions.get(leafId)?.blocks ?? false;
   },
-  isLeafCodex(leafId) {
-    return sessions.get(leafId)?.agentType === "codex";
-  },
   isLeafBusy(leafId) {
     const s = sessions.get(leafId);
     return !!s && leafBusy(s);
@@ -536,6 +537,7 @@ async function openPtyForSession(
     },
     cwd,
     s.blocks,
+    s.agentType,
   );
 }
 

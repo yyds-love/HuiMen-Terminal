@@ -2,9 +2,14 @@ import { quoteShellArg } from "@/lib/shellQuote";
 
 export type AgentType = "claude" | "codex" | "opencode";
 
-/** Bare invocation used to start a brand-new agent session. */
-export function agentBareCommand(agent: AgentType): string {
-  return agent;
+/** Command used to start a brand-new agent session. */
+export function agentBareCommand(
+  agent: AgentType,
+  codexInlineScrollback = false,
+): string {
+  return agent === "codex" && codexInlineScrollback
+    ? "codex --no-alt-screen"
+    : agent;
 }
 
 /**
@@ -18,13 +23,14 @@ export function agentBareCommand(agent: AgentType): string {
 export function agentResumeCommand(
   agent: AgentType,
   sessionId?: string,
+  codexInlineScrollback = false,
 ): string {
   const id = sessionId ? quoteShellArg(sessionId) : "";
   switch (agent) {
     case "claude":
       return sessionId ? `claude --resume ${id}` : "claude --continue";
     case "codex":
-      return sessionId ? `codex resume ${id}` : "codex resume --last";
+      return `codex resume${codexInlineScrollback ? " --no-alt-screen" : ""} ${sessionId ? id : "--last"}`;
     case "opencode":
       return sessionId ? `opencode --session ${id}` : "opencode --continue";
   }

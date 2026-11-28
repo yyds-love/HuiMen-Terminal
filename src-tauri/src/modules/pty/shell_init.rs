@@ -53,16 +53,17 @@ pub fn build_command(
     cwd: Option<String>,
     workspace: WorkspaceEnv,
     blocks: bool,
+    agent_type: Option<super::PtyAgent>,
     appearance: &TerminalAppearance,
 ) -> Result<CommandBuilder, String> {
     #[cfg(unix)]
     {
-        let _ = workspace;
+        let _ = (workspace, agent_type);
         unix::build(cwd, blocks, appearance)
     }
     #[cfg(windows)]
     {
-        windows::build(cwd, workspace, blocks, appearance)
+        windows::build(cwd, workspace, blocks, agent_type, appearance)
     }
 }
 
@@ -323,6 +324,7 @@ mod windows {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use crate::modules::pty::PtyAgent;
     use crate::modules::pty::TerminalAppearance;
     use crate::modules::workspace::WorkspaceEnv;
     use portable_pty::CommandBuilder;
@@ -370,6 +372,7 @@ mod windows {
         cwd: Option<String>,
         workspace: WorkspaceEnv,
         blocks: bool,
+        agent_type: Option<PtyAgent>,
         appearance: &TerminalAppearance,
     ) -> Result<CommandBuilder, String> {
         if let WorkspaceEnv::Wsl { distro } = workspace {
@@ -386,6 +389,11 @@ mod windows {
 
         let mut cmd = CommandBuilder::new(&shell_path);
         super::apply_common(&mut cmd, cwd, blocks, appearance);
+        apply_agent_compat_env(
+            &mut cmd,
+            agent_type,
+            super::super::windows_console_input::affected_version(tauri_plugin_os::version()),
+        );
 
         if is_powershell {
             match prepare_ps_profile() {
@@ -407,6 +415,32 @@ mod windows {
 
         log::info!("spawning Windows shell: {}", shell_path.display());
         Ok(cmd)
+    }
+
+    fn apply_agent_compat_env(
+        cmd: &mut CommandBuilder,
+        agent_type: Option<PtyAgent>,
+        affected_windows_version: bool,
+    ) {
+        if !affected_windows_version {
+            return;
+        }
+
+        match agent_type {
+            Some(PtyAgent::Claude)
+                if cmd
+                    .get_env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN")
+                    .is_none() =>
+            {
+                cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1");
+            }
+            Some(PtyAgent::Codex) if cmd.get_env("WT_SESSION").is_none() => {
+                // Codex uses this hint to insert inline history by scrolling
+                // the whole screen. ConPTY 1809 drops lines from partial scroll regions.
+                cmd.env("WT_SESSION", "XuYa Terminal");
+            }
+            _ => {}
+        }
     }
 
     fn build_wsl(
@@ -663,6 +697,55 @@ mod windows {
                 background: "#0d1117".into(),
                 cursor: "#f6f8fa".into(),
             }
+        }
+
+        #[test]
+        fn sets_claude_classic_renderer_compatibility_env() {
+            let mut cmd = CommandBuilder::new("powershell.exe");
+            apply_agent_compat_env(&mut cmd, Some(PtyAgent::Claude), true);
+
+            assert_eq!(
+                cmd.get_env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"),
+                Some(std::ffi::OsStr::new("1")),
+            );
+            assert_eq!(cmd.get_env("WT_SESSION"), None);
+        }
+
+        #[test]
+        fn preserves_an_existing_claude_renderer_setting() {
+            let mut cmd = CommandBuilder::new("powershell.exe");
+            cmd.env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "0");
+
+            apply_agent_compat_env(&mut cmd, Some(PtyAgent::Claude), true);
+
+            assert_eq!(
+                cmd.get_env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"),
+                Some(std::ffi::OsStr::new("0")),
+            );
+        }
+
+        #[test]
+        fn limits_agent_renderer_compatibility_to_the_affected_windows_version() {
+            let mut claude = CommandBuilder::new("powershell.exe");
+            apply_agent_compat_env(&mut claude, Some(PtyAgent::Claude), false);
+
+            let mut codex = CommandBuilder::new("powershell.exe");
+            apply_agent_compat_env(&mut codex, Some(PtyAgent::Codex), false);
+
+            assert_eq!(claude.get_env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"), None);
+            assert_eq!(codex.get_env("WT_SESSION"), None);
+        }
+
+        #[test]
+        fn keeps_codex_compatibility_separate_from_claude_renderer_setting() {
+            let mut cmd = CommandBuilder::new("powershell.exe");
+            apply_agent_compat_env(&mut cmd, Some(PtyAgent::Codex), true);
+
+            assert_eq!(
+                cmd.get_env("WT_SESSION"),
+                Some(std::ffi::OsStr::new("XuYa Terminal"))
+            );
+            assert_eq!(cmd.get_env("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"), None);
         }
 
         fn wsl_prefix(cwd: &str) -> Vec<String> {

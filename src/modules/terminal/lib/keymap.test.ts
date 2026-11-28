@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  codexAltScreenWheelSequence,
   isTerminalCopyShortcut,
   isTerminalPasteShortcut,
   type TerminalKeyEvent,
@@ -45,7 +44,6 @@ describe("terminalWordNavigationSequence", () => {
     ).toBeNull();
   });
 });
-
 describe("terminalLineNavigationSequence", () => {
   it("maps Cmd+Left to readline line-start on macOS", () => {
     expect(
@@ -221,43 +219,5 @@ describe("terminal modified keys", () => {
     expect(
       terminalModifiedKeyInput(evt({ key: "j", ctrlKey: true }), false),
     ).toBeNull();
-  });
-});
-
-describe("codex alternate-screen wheel navigation", () => {
-  const modes = {
-    isCodex: true,
-    isAlternateBuffer: true,
-    mouseTrackingMode: "vt200" as const,
-    applicationCursorKeysMode: false,
-  };
-
-  it("maps wheel up and down to normal cursor-key sequences", () => {
-    expect(codexAltScreenWheelSequence({ deltaY: -40 }, modes)).toBe("\x1b[A");
-    expect(codexAltScreenWheelSequence({ deltaY: 40 }, modes)).toBe("\x1b[B");
-  });
-
-  it("uses application cursor-key sequences when enabled", () => {
-    expect(
-      codexAltScreenWheelSequence(
-        { deltaY: -40 },
-        { ...modes, applicationCursorKeysMode: true },
-      ),
-    ).toBe("\x1bOA");
-  });
-
-  it.each([
-    ["another agent", { ...modes, isCodex: false }],
-    ["the normal buffer", { ...modes, isAlternateBuffer: false }],
-    [
-      "disabled mouse tracking",
-      { ...modes, mouseTrackingMode: "none" as const },
-    ],
-  ])("leaves wheel input unchanged for %s", (_reason, otherModes) => {
-    expect(codexAltScreenWheelSequence({ deltaY: 40 }, otherModes)).toBeNull();
-  });
-
-  it("ignores horizontal-only wheel events", () => {
-    expect(codexAltScreenWheelSequence({ deltaY: 0 }, modes)).toBeNull();
   });
 });

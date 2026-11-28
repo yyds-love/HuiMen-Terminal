@@ -91,8 +91,8 @@ impl ConsoleKey {
     }
 }
 
-fn affected_version(version: Version) -> bool {
-    // System ConPTY on Windows 10 1809 loses modifiers for these keys.
+pub(super) fn affected_version(version: Version) -> bool {
+    // Windows 10 1809 ships the first version of system ConPTY.
     matches!(version, Version::Semantic(10, 0, 17_763))
 }
 

@@ -21,6 +21,35 @@ use tauri::ipc::{Channel, Response};
 use crate::modules::workspace::{authorize_user_spawn_cwd, WorkspaceEnv, WorkspaceRegistry};
 use session::Session;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PtyAgent {
+    Claude,
+    Codex,
+    OpenCode,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PtyAgent;
+
+    #[test]
+    fn pty_agent_deserializes_frontend_agent_names() {
+        assert_eq!(
+            serde_json::from_str::<PtyAgent>(r#""claude""#).unwrap(),
+            PtyAgent::Claude,
+        );
+        assert_eq!(
+            serde_json::from_str::<PtyAgent>(r#""codex""#).unwrap(),
+            PtyAgent::Codex,
+        );
+        assert_eq!(
+            serde_json::from_str::<PtyAgent>(r#""opencode""#).unwrap(),
+            PtyAgent::OpenCode,
+        );
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalAppearance {
@@ -75,6 +104,7 @@ pub async fn pty_open(
     cwd: Option<String>,
     workspace: Option<WorkspaceEnv>,
     blocks: Option<bool>,
+    agent_type: Option<PtyAgent>,
     appearance: Option<TerminalAppearance>,
     on_data: Channel<Response>,
     on_exit: Channel<i32>,
@@ -89,7 +119,7 @@ pub async fn pty_open(
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let session = tauri::async_runtime::spawn_blocking(move || {
         session::spawn(
-            id, app, cols, rows, cwd, workspace, blocks, appearance, on_data, on_exit,
+            id, app, cols, rows, cwd, workspace, blocks, agent_type, appearance, on_data, on_exit,
         )
         .map(|(s, _)| s)
     })

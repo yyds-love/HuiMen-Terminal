@@ -39,31 +39,6 @@ export function terminalModifiedKeyInput(
   return null;
 }
 
-export type TerminalWheelModes = {
-  isCodex: boolean;
-  isAlternateBuffer: boolean;
-  mouseTrackingMode: "none" | "x10" | "vt200" | "drag" | "any";
-  applicationCursorKeysMode: boolean;
-};
-
-export function codexAltScreenWheelSequence(
-  event: Pick<WheelEvent, "deltaY">,
-  modes: TerminalWheelModes,
-): string | null {
-  if (
-    !modes.isCodex ||
-    !modes.isAlternateBuffer ||
-    modes.mouseTrackingMode === "none" ||
-    event.deltaY === 0
-  ) {
-    return null;
-  }
-
-  const direction = event.deltaY < 0 ? "A" : "B";
-  const cursorMode = modes.applicationCursorKeysMode ? "O" : "[";
-  return `\x1b${cursorMode}${direction}`;
-}
-
 export function terminalWordNavigationSequence(
   event: TerminalKeyEvent,
 ): string | null {
